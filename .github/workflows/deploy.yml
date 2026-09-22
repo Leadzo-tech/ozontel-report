@@ -1,0 +1,116 @@
+name: Deploy Ozonetel CDR Sync
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  PYTHON_VERSION: "3.12"
+  FUNCTION_NAME: ozonetel-cdr-proxy-poc
+  RULE_NAME: ozonetel-cdr-sync-hourly
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -q
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ozonetel-cdr-proxy-poc-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::018100542607:role/ozonetel-cdr-proxy-poc-github-actions-role
+          role-session-name: ozonetel-cdr-proxy-poc-deploy
+
+      - name: Build Lambda zip
+        run: |
+          set -euo pipefail
+          rm -rf build function.zip
+          mkdir build
+          pip install -r requirements.txt -t build/ \
+            --platform manylinux2014_x86_64 \
+            --only-binary=:all: \
+            --python-version 3.12 \
+            --implementation cp --abi cp312
+          cp handler.py ozonetel_cdr.py sheets_client.py secrets.py build/
+          (cd build && zip -qr ../function.zip .)
+          ls -lh function.zip
+
+      - name: Update Lambda code
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://function.zip \
+            --publish > /dev/null
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+
+      - name: Update GIT_SHA and Ozonetel credentials
+        env:
+          OZONETEL_API_KEY: ${{ secrets.OZONETEL_API_KEY }}
+          OZONETEL_USERNAME: ${{ secrets.OZONETEL_USERNAME }}
+        run: |
+          set -euo pipefail
+          current=$(aws lambda get-function-configuration \
+            --function-name "$FUNCTION_NAME" \
+            --query 'Environment.Variables' --output json)
+          echo "$current" | jq \
+            --arg sha "$GITHUB_SHA" \
+            --arg ozkey "$OZONETEL_API_KEY" \
+            --arg ozuser "$OZONETEL_USERNAME" \
+            '. + {GIT_SHA: $sha, OZONETEL_API_KEY: $ozkey, OZONETEL_USERNAME: $ozuser} | {Variables: .}' > /tmp/env.json
+          aws lambda update-function-configuration \
+            --function-name "$FUNCTION_NAME" \
+            --environment file:///tmp/env.json > /dev/null
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+
+      - name: Ensure hourly EventBridge schedule exists
+        run: |
+          set -euo pipefail
+          function_arn=$(aws lambda get-function --function-name "$FUNCTION_NAME" \
+            --query 'Configuration.FunctionArn' --output text)
+
+          aws events put-rule \
+            --name "$RULE_NAME" \
+            --schedule-expression "rate(5 minutes)" \
+            --state ENABLED \
+            --description "Ozonetel CDR -> Sheet sync via $FUNCTION_NAME" > /dev/null
+
+          aws events put-targets \
+            --rule "$RULE_NAME" \
+            --targets "Id=$FUNCTION_NAME,Arn=$function_arn" > /dev/null
+
+          rule_arn=$(aws events describe-rule --name "$RULE_NAME" --query 'Arn' --output text)
+          aws lambda add-permission \
+            --function-name "$FUNCTION_NAME" \
+            --statement-id "${RULE_NAME}-invoke" \
+            --action lambda:InvokeFunction \
+            --principal events.amazonaws.com \
+            --source-arn "$rule_arn" 2>/dev/null || true

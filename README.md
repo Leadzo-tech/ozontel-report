@@ -28,6 +28,19 @@ GET + `apiKey` header + JSON body -> 200 with real data.
 
 ## Deploy
 
+Push to `main` — `.github/workflows/deploy.yml` runs `pytest`, builds the
+Lambda zip, deploys it via OIDC (role `ozonetel-cdr-proxy-poc-github-actions-role`,
+no long-lived AWS keys), and reconciles the `ozonetel-cdr-sync-hourly`
+EventBridge rule. Requires the repo secrets `OZONETEL_API_KEY` and
+`OZONETEL_USERNAME` to be set (`gh secret set ... --repo Leadzo-tech/ozontel-report`).
+
+`template.yaml` documents the current live shape of the function for
+reference — it is **not** deployed by CI or meant to be `sam deploy`'d, since
+the real resources were created manually and stay CLI/CI-managed (see the
+comment at the top of that file).
+
+Manual deploy (fallback, e.g. for local debugging without waiting on CI):
+
 ```bash
 pip install --target build -r requirements.txt \
   --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
@@ -38,7 +51,15 @@ aws lambda update-function-code --function-name ozonetel-cdr-proxy-poc \
   --zip-file fileb://function.zip --region ap-south-1
 ```
 
+## Tests
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
+```
+
 ## Schedule
 
-EventBridge rule `ozonetel-cdr-sync-hourly` (`rate(1 hour)`) targets this
-function directly — no CI/CD wired up yet.
+EventBridge rule `ozonetel-cdr-sync-hourly` (`rate(5 minutes)`) targets this
+function directly, reconciled idempotently by the deploy workflow on every
+push to `main`.
