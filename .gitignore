@@ -1,0 +1,4 @@
+build/
+function.zip
+__pycache__/
+*.pyc
