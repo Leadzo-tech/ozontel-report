@@ -60,6 +60,27 @@ def _fetch_day(endpoint: str, date_str: str, api_key: str, username: str) -> lis
     return data.get("details", [])
 
 
+def _add_assigned_agent(records: list[dict]) -> None:
+    """Set AssignedAgent on every record: its own AgentName, else the agent the
+    call went to on another leg with the same CallID.
+
+    Ozonetel splits an inbound call into legs sharing one CallID; the queue
+    leg never has an agent. The agent who answered wins, else the one it was
+    offered to. A call no agent was ever assigned to stays blank. AgentName
+    itself is left as Ozonetel sent it, so per-agent counts don't also count
+    queue legs.
+    """
+    by_call: dict[str, str] = {}
+    for record in records:
+        call_id, agent = str(record.get("CallID", "")), record.get("AgentName") or ""
+        if not call_id or not agent:
+            continue
+        if record.get("Status") == "Answered" or call_id not in by_call:
+            by_call[call_id] = agent
+    for record in records:
+        record["AssignedAgent"] = record.get("AgentName") or by_call.get(str(record.get("CallID", "")), "")
+
+
 def _project(records: list[dict], projection: dict[str, str]) -> list[dict]:
     """Shape each record: keep only the projected fields, under their output
     names, in the order declared.
@@ -105,6 +126,7 @@ def run(
     sheet_spec = spec_raw["sheet"]
     projection = ozonetel.get("projection") or {}
     if projection:
+        _add_assigned_agent(all_records)
         all_records = _project(all_records, projection)
         # The projection's key order is the column order — no second list to
         # keep in sync.

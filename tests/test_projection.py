@@ -19,10 +19,10 @@ def test_projection_fills_missing_source_fields_with_empty_string():
     assert projected == [{"Call ID": 1, "Rating": ""}]
 
 
-def test_shipped_spec_projects_37_of_the_47_ozonetel_fields():
+def test_shipped_spec_projects_38_columns_ozonetel_fields():
     spec = load_report_specs()["ozonetel-cdr-sync"]
     projection = spec.raw["ozonetel"]["projection"]
-    assert len(projection) == 37
+    assert len(projection) == 38
     assert "UCID" not in projection and "Rating" not in projection
     assert "AgentID" not in projection
     assert list(projection)[0] == "CallID"
@@ -48,3 +48,18 @@ def test_rejects_projection_and_preferred_order_together(tmp_path: Path):
     )
     with pytest.raises(ReportSpecError, match="not both"):
         load_report_specs(_write(tmp_path, body))
+
+
+def test_assigned_agent_comes_from_the_calls_other_legs():
+    from src.ozonetel_cdr import _add_assigned_agent
+
+    records = [
+        {"CallID": "1", "AgentName": "", "Status": "Unanswered"},  # queue leg
+        {"CallID": "1", "AgentName": "Fazil MD", "Status": "Answered"},
+        {"CallID": "2", "AgentName": "", "Status": "Unanswered"},  # queue leg
+        {"CallID": "2", "AgentName": "Rakshit", "Status": "Unanswered"},  # offered, not picked up
+        {"CallID": "3", "AgentName": "", "Status": "Unanswered"},  # abandoned in queue
+    ]
+    _add_assigned_agent(records)
+    assert [r["AssignedAgent"] for r in records] == ["Fazil MD", "Fazil MD", "Rakshit", "Rakshit", ""]
+    assert records[0]["AgentName"] == ""
