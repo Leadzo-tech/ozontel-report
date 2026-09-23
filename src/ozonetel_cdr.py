@@ -76,7 +76,13 @@ def _project(records: list[dict], projection: dict[str, str]) -> list[dict]:
     ]
 
 
-def run(spec_raw: dict[str, Any], api_key: str, username: str, full_backfill: bool = False) -> dict:
+def run(
+    spec_raw: dict[str, Any],
+    api_key: str,
+    username: str,
+    full_backfill: bool = False,
+    replace: bool = False,
+) -> dict:
     ozonetel = spec_raw["ozonetel"]
     endpoint = ozonetel["endpoint"]
     days_back = ozonetel["days_back_full"] if full_backfill else ozonetel["days_back_routine"]
@@ -107,11 +113,18 @@ def run(spec_raw: dict[str, Any], api_key: str, username: str, full_backfill: bo
             "columns": {**(sheet_spec.get("columns") or {}), "preferred_order": list(projection)},
         }
 
+    if replace:
+        # Rebuild the tab from scratch with just what was fetched. Only reached
+        # once every day's fetch has succeeded, so a failed pull can't leave
+        # the sheet empty. Anything older than the pull window is dropped.
+        sheet_spec = {**sheet_spec, "write_mode": "overwrite", "clear_before_write": True}
+
     google_sa_json = get_json_parameter(parameter_name("GOOGLE_SA_JSON_PARAM", "google/sa-json"))
     sheet_result = SheetWriter(google_sa_json).write(sheet_spec, all_records)
 
     return {
         "status": "success",
+        "replaced_sheet": replace,
         "days_pulled": len(per_day_counts),
         "per_day_counts": per_day_counts,
         "rows_read": len(all_records),

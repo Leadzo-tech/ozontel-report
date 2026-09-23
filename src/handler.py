@@ -16,6 +16,7 @@ def handle(event: dict[str, Any], context: Any) -> dict[str, Any]:
     environment = (event or {}).get("environment") or os.environ.get("ENVIRONMENT", "prod")
     git_sha = os.environ.get("GIT_SHA", "unknown")
     full_backfill = bool((event or {}).get("full_backfill", False))
+    replace = bool((event or {}).get("replace", False))
 
     spec = get_report_spec(report_name)
     log_context = {
@@ -24,6 +25,7 @@ def handle(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "git_sha": git_sha,
         "spec_hash": spec.spec_hash,
         "full_backfill": full_backfill,
+        "replace": replace,
     }
 
     if not spec.enabled:
@@ -37,7 +39,9 @@ def handle(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     log_event("start", **log_context)
     try:
-        result = run_ozonetel_sync(spec.raw, api_key, username, full_backfill=full_backfill)
+        result = run_ozonetel_sync(
+            spec.raw, api_key, username, full_backfill=full_backfill, replace=replace
+        )
         log_event("success", rows_written=result["rows_written"], **log_context)
         return {"report_name": report_name, **result}
     except Exception as exc:

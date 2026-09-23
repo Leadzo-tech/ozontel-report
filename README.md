@@ -275,7 +275,9 @@ Reading the result:
 - `rows_read: 0` for every day → check the dates. Beyond 15 days back returns
   empty rather than erroring.
 
-Backfill the full retention window:
+Backfill the full retention window. Without AWS access, use the **Backfill
+Ozonetel Report** workflow in GitHub Actions (Run workflow; tick `replace` to
+clear the tab and rebuild it from the pull). Or from a shell:
 
 ```bash
 aws lambda invoke --profile leadzo --region ap-south-1 \

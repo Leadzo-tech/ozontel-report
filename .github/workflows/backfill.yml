@@ -1,0 +1,57 @@
+name: Backfill Ozonetel Report
+
+# Manual one-off: pulls all days Ozonetel still retains (days_back_full + today)
+# into the sheet. With `replace`, the tab is cleared and rebuilt from that pull
+# (the clear happens only after every day's fetch succeeded).
+on:
+  workflow_dispatch:
+    inputs:
+      report_name:
+        description: Report to backfill
+        default: ozonetel-cdr-sync
+        required: true
+      replace:
+        description: Clear the tab and rebuild it from the pull (drops rows older than the window)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  FUNCTION_NAME: ozonetel-cdr-proxy-poc
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Shares the deploy group so a backfill never runs mid-deploy.
+    concurrency:
+      group: ozonetel-report-prod
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::018100542607:role/ozonetel-cdr-proxy-poc-github-actions-role
+          role-session-name: ozonetel-report-prod-backfill
+
+      - name: Invoke Lambda (async)
+        env:
+          REPORT_NAME: ${{ inputs.report_name }}
+          REPLACE: ${{ inputs.replace }}
+        run: |
+          set -euo pipefail
+          payload=$(jq -nc --arg r "$REPORT_NAME" --argjson replace "$REPLACE" \
+            '{report_name: $r, full_backfill: true, replace: $replace}')
+          echo "payload: $payload"
+          # Async: a full backfill takes ~8 min. Follow it in the function's
+          # CloudWatch logs, or just watch the sheet.
+          aws lambda invoke \
+            --function-name "$FUNCTION_NAME" \
+            --invocation-type Event \
+            --cli-binary-format raw-in-base64-out \
+            --payload "$payload" \
+            /tmp/out.json
