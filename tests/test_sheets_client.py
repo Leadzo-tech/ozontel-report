@@ -66,3 +66,19 @@ def test_merge_rows_keeps_history_updates_in_place_and_appends_new():
 
 def test_merge_rows_on_empty_sheet_returns_new_rows():
     assert merge_rows([], [{"CallID": 1}], "CallID") == [{"CallID": 1}]
+
+
+def test_truncate_cell_writes_long_integers_as_text():
+    assert truncate_cell(90576912345678901) == "90576912345678901"
+    assert truncate_cell(123) == 123
+
+
+def test_merge_rows_replaces_a_callid_sheets_rounded():
+    # Sheets stored 90576912345678901 as a double and hands it back rounded.
+    existing = [["CallID", "Status"], [9.05769123456789e16, "Unanswered"], ["1", "Answered"]]
+    new = [{"CallID": "90576912345678901", "Status": "Answered"}]
+    merged = merge_rows(existing, new, "CallID")
+    assert merged == [
+        {"CallID": "90576912345678901", "Status": "Answered"},
+        {"CallID": "1", "Status": "Answered"},
+    ]

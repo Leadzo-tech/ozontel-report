@@ -13,7 +13,15 @@ _WRITE_BATCH_SIZE = 10_000
 _TRUNCATION_MARKER = "… [truncated]"
 
 
+# Sheets stores numbers as doubles: past 15 significant digits it rounds them
+# and shows e.g. 9.05769E+16. Ozonetel CallIDs are 17 digits, so any integer
+# that long is written as text instead.
+_MAX_EXACT_SHEETS_INT = 10**15
+
+
 def truncate_cell(value: Any) -> Any:
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= _MAX_EXACT_SHEETS_INT:
+        return str(value)
     if isinstance(value, str) and len(value) > MAX_CELL_CHARS:
         keep = MAX_CELL_CHARS - len(_TRUNCATION_MARKER) - 1
         return value[:keep] + _TRUNCATION_MARKER
@@ -58,16 +66,23 @@ def merge_rows(
     """
     merged: list[dict[str, Any]] = []
     index: dict[str, int] = {}
+    # Keys Sheets already rounded (stored as a number, see truncate_cell), by
+    # their float value, so the exact key from the API can still replace them.
+    rounded: dict[float, int] = {}
     if existing_values:
         header = existing_values[0]
         for raw in existing_values[1:]:
             row = {name: value for name, value in zip(header, raw) if name}
-            row_key = str(row.get(key, ""))
-            if row_key:
-                index[row_key] = len(merged)
+            value = row.get(key, "")
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) >= _MAX_EXACT_SHEETS_INT:
+                rounded[float(value)] = len(merged)
+            elif str(value):
+                index[str(value)] = len(merged)
             merged.append(row)
     for row in (flatten_document(r) for r in new_rows):
         row_key = str(row.get(key, ""))
+        if row_key and row_key not in index and row_key.isdigit() and float(row_key) in rounded:
+            index[row_key] = rounded.pop(float(row_key))
         if row_key and row_key in index:
             merged[index[row_key]] = row
         else:
