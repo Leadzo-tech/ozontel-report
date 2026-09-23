@@ -11,6 +11,11 @@ match what's live in AWS.
 Currently one report ships: `ozonetel-cdr-sync` — last 2 days of CDRs into the
 `Ozonetel` tab of the call-KPI sheet, every 5 minutes.
 
+Before changing anything, read two sections: **"Know your target: the Ozonetel
+API"** (the API's contract is unusual and its error messages lie) and
+**"The target sheet, and what else writes to it"** (a second implementation of
+this sync exists in another repo).
+
 ## How to add or change a scheduled report
 
 1. Drop a new file in `scheduled_reports/<report-name>.yaml`. Minimum shape:
@@ -252,21 +257,77 @@ aws logs filter-log-events --profile leadzo --region ap-south-1 \
   --query 'events[].message' --output text
 ```
 
+## The target sheet, and what else writes to it
+
+Spreadsheet `1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0`
+([open](https://docs.google.com/spreadsheets/d/1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0/edit)),
+tab **`Ozonetel`**. That tab is a machine-owned snapshot: every run clears it
+and rewrites the last `days_back_routine` days. Anything hand-added there is
+destroyed on the next run — build derived views in *other* tabs that reference
+it.
+
+**Known issue, not caused by this service:** the `KPI Dashboard` tab in the
+same spreadsheet is full of `#REF!` / `#VALUE!` errors and reads
+"Data through Dec 30, 1899". Those formulas came from an earlier Google Apps
+Script (`buildDashboard()`) and reference a column layout that no longer
+matches. This service only ever writes the `Ozonetel` tab and never touches
+`KPI Dashboard`; fixing those formulas is separate work.
+
+### ⚠️ A second implementation exists — don't let both run
+
+The same Ozonetel sync also lives in the **`Leadzo-tech/data-pipelines`** repo
+(the query-scheduler), as `src/ozonetel_cdr.py` dispatched by
+`handler.py::_NON_MONGO_HANDLERS["ozonetel-cdr-sync"]`. The
+`leadzo-prod-query-scheduler-worker` Lambda still carries `OZONETEL_API_KEY`
+and `OZONETEL_USERNAME` env vars and **writes to this same spreadsheet and
+tab**.
+
+Current state (verified): it is **deployed but not scheduled** — no EventBridge
+rule invokes its Ozonetel path, so in normal operation only this repo writes
+the sheet. But it can still be fired by hand via the `Ozonetel CDR Sync
+(manual)` `workflow_dispatch` action in that repo, which would overwrite the
+tab from a separate codebase with its own (possibly drifted) column list and
+pull window.
+
+If you're changing how this sheet is written, check that repo too. The clean
+end-state is deleting the Ozonetel path from `data-pipelines` so there's one
+owner — that hasn't been done, and it isn't this repo's call to make.
+
 ## One-time AWS setup (already done — for reference)
 
-Account `018100542607`, region `ap-south-1`.
+Account `018100542607`, region `ap-south-1`. CLI examples use
+`--profile leadzo`; drop it if your default profile is already this account.
 
 ### SSM parameters
 
-| Path | Type | Purpose |
-|---|---|---|
-| `/leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json` | SecureString | Google service account JSON (whole file). Copied from the query-scheduler's param — same SA. |
-| `/leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url` | SecureString | Slack webhook for failure alerts. **Not yet created** — alerts silently no-op until it is. |
+All under the prefix `/leadzo/ozonetel-cdr-proxy-poc/poc/`.
+
+| Path | Type | Exists? | Purpose |
+|---|---|---|---|
+| `…/google/sa-json` | SecureString | yes | Google service account JSON (whole file). Copied verbatim from `/leadzo/query-scheduler/prod/google/sa-json` — deliberately the *same* SA, so sheets only need sharing with one Google identity. |
+| `…/slack/default-webhook-url` | SecureString | **no** | Slack webhook for failure alerts. Until it's created, alerts no-op silently (by design — `get_optional_parameter` treats a missing param as "not configured"). |
 
 ```bash
+# create / rotate
 aws ssm put-parameter --profile leadzo --region ap-south-1 \
-  --name <path> --type SecureString --value "file://<file>" --overwrite
+  --name /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url \
+  --type SecureString --value "file://<file>" --overwrite
 ```
+
+### Where every credential lives (rotation checklist)
+
+There are only three secrets in this system. Rotating any of them means
+updating **every** place listed, not just one:
+
+| Secret | Lives in | Rotate by |
+|---|---|---|
+| Ozonetel API key | Lambda env var `OZONETEL_API_KEY` **and** GitHub repo secret `OZONETEL_API_KEY` | `gh secret set OZONETEL_API_KEY --repo Leadzo-tech/ozontel-report` **and** `aws lambda update-function-configuration --environment ...` (env update replaces *all* vars — re-send the full set, don't send one key). Note the same key is also on `leadzo-prod-query-scheduler-worker` — see "Related systems" below. |
+| Google service account JSON | SSM `…/google/sa-json` here, and `/leadzo/query-scheduler/prod/google/sa-json` in the other repo | Regenerate the key in GCP, `put-parameter --overwrite` on **both** paths. Nothing caches it beyond a warm Lambda container. |
+| Slack webhook | SSM `…/slack/default-webhook-url` (not yet created) | `put-parameter --overwrite`. |
+
+The Ozonetel account itself is `userName: leadzo`; the key comes from the
+CloudAgent admin panel. The CloudAgent setting **API Authentication must be
+`TOKEN_AUTH`** for the reports API to be reachable at all.
 
 ### Lambda
 
@@ -285,8 +346,17 @@ Environment variables:
 | `ENVIRONMENT` | no | Stamped into logs; defaults to `prod`, and EventBridge passes it in the event anyway. |
 | `GIT_SHA` | no | Stamped into logs. Set by CI; reads `unknown` on manual deploys. |
 
-Execution role `ozonetel-cdr-proxy-poc-role`: `AWSLambdaBasicExecutionRole`
-plus `ssm:GetParameter` on the prefix and `kms:Decrypt` on the SSM key.
+### IAM identities
+
+| Identity | What it is | Access |
+|---|---|---|
+| `ozonetel-cdr-proxy-poc-role` | The function's **execution role** — what the code runs as | Managed `AWSLambdaBasicExecutionRole` (CloudWatch logs) + inline `read-google-sa-ssm-param`: `ssm:GetParameter` on `…/google/sa-json` only, and `kms:Decrypt` on the default `alias/aws/ssm` key. Deliberately cannot read any other parameter. |
+| `ozonetel-cdr-proxy-poc-github-actions-role` | **CI deploy role**, assumed via OIDC — no long-lived keys | Inline `ozonetel-cdr-proxy-poc-deploy`: Lambda code/config update + `AddPermission` on this one function ARN, and EventBridge rule management on `oz-prod-*`. No IAM, no CloudFormation, no S3. ⚠️ currently failing — see below. |
+| `meenal_lambda_only` | IAM **user** (a teammate), not a role | Inline `ozonetel-cdr-proxy-poc-full-access`: `lambda:*` scoped to this function's ARN and nothing else in the account. She can deploy/invoke/edit this function directly. (She also holds `QuerySchedulerLambdaAdminOnly` for a different function.) |
+
+Deliberately *not* granted anywhere: VPC access, database access, or any
+`iam:*`. This function talks to exactly two things — Ozonetel over the public
+internet and Google Sheets — so it needs nothing else.
 
 ### EventBridge
 
