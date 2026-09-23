@@ -1,4 +1,4 @@
-name: Deploy Ozonetel CDR Sync
+name: Deploy Ozonetel Report Prod
 
 on:
   pull_request:
@@ -13,9 +13,9 @@ permissions:
 
 env:
   AWS_REGION: ap-south-1
+  ENVIRONMENT: prod
   PYTHON_VERSION: "3.12"
   FUNCTION_NAME: ozonetel-cdr-proxy-poc
-  RULE_NAME: ozonetel-cdr-sync-hourly
 
 jobs:
   validate:
@@ -26,7 +26,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: pip install -r requirements-dev.txt
+      - name: Validate scheduled report specs
+        run: python -m src.validate_specs
       - name: Run tests
         run: pytest -q
 
@@ -35,40 +37,42 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     concurrency:
-      group: ozonetel-cdr-proxy-poc-deploy
+      group: ozonetel-report-prod
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install runner dependencies
+        run: pip install -r requirements-dev.txt
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::018100542607:role/ozonetel-cdr-proxy-poc-github-actions-role
-          role-session-name: ozonetel-cdr-proxy-poc-deploy
+          role-session-name: ozonetel-report-prod-deploy
 
       - name: Build Lambda zip
         run: |
           set -euo pipefail
-          rm -rf build function.zip
+          rm -rf build lambda.zip
           mkdir build
           pip install -r requirements.txt -t build/ \
             --platform manylinux2014_x86_64 \
             --only-binary=:all: \
             --python-version 3.12 \
             --implementation cp --abi cp312
-          cp handler.py ozonetel_cdr.py sheets_client.py secrets.py ozonetel_cdr.yaml build/
-          (cd build && zip -qr ../function.zip .)
-          ls -lh function.zip
+          cp -r src scheduled_reports build/
+          (cd build && zip -qr ../lambda.zip . -x "*/__pycache__/*" "__pycache__/*")
+          ls -lh lambda.zip
 
       - name: Update Lambda code
         run: |
           set -euo pipefail
           aws lambda update-function-code \
             --function-name "$FUNCTION_NAME" \
-            --zip-file fileb://function.zip \
+            --zip-file fileb://lambda.zip \
             --publish > /dev/null
           aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 
@@ -91,26 +95,16 @@ jobs:
             --environment file:///tmp/env.json > /dev/null
           aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 
-      - name: Ensure hourly EventBridge schedule exists
+      - name: Resolve Lambda ARN
+        id: lambda
         run: |
           set -euo pipefail
-          function_arn=$(aws lambda get-function --function-name "$FUNCTION_NAME" \
-            --query 'Configuration.FunctionArn' --output text)
+          lambda_arn=$(aws lambda get-function --function-name "$FUNCTION_NAME" --query 'Configuration.FunctionArn' --output text)
+          echo "lambda_arn=$lambda_arn" >> "$GITHUB_OUTPUT"
 
-          aws events put-rule \
-            --name "$RULE_NAME" \
-            --schedule-expression "rate(5 minutes)" \
-            --state ENABLED \
-            --description "Ozonetel CDR -> Sheet sync via $FUNCTION_NAME" > /dev/null
-
-          aws events put-targets \
-            --rule "$RULE_NAME" \
-            --targets "Id=$FUNCTION_NAME,Arn=$function_arn" > /dev/null
-
-          rule_arn=$(aws events describe-rule --name "$RULE_NAME" --query 'Arn' --output text)
-          aws lambda add-permission \
-            --function-name "$FUNCTION_NAME" \
-            --statement-id "${RULE_NAME}-invoke" \
-            --action lambda:InvokeFunction \
-            --principal events.amazonaws.com \
-            --source-arn "$rule_arn" 2>/dev/null || true
+      - name: Reconcile EventBridge schedules
+        run: |
+          python -m src.eventbridge_sync \
+            --environment "${ENVIRONMENT}" \
+            --lambda-arn "${{ steps.lambda.outputs.lambda_arn }}" \
+            --lambda-function-name "$FUNCTION_NAME"

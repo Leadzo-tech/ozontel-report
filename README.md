@@ -1,75 +1,428 @@
-# ozontel-report
+# Ozonetel Report
 
-Standalone Lambda (`ozonetel-cdr-proxy-poc`, ap-south-1) that pulls call
-records from Ozonetel's `fetchCDRDetails` API and writes them into the
-"Ozonetel" tab of the shared KPI Google Sheet.
+Schedule-driven Ozonetel CDR → Google Sheets exporter running on AWS Lambda.
 
-## Why this exists as its own Lambda, not inside Apps Script
+Each scheduled report is a YAML file in `scheduled_reports/`. The Lambda pulls
+call detail records from Ozonetel's `fetchCDRDetails` API and overwrites a
+worksheet with them. On every push to `main`, CI builds the Lambda code,
+deploys it, and reconciles EventBridge rules so the schedules declared in YAML
+match what's live in AWS.
 
-Ozonetel's `fetchCDRDetails` requires a literal GET request carrying a JSON
-body. Google Apps Script's `UrlFetchApp` silently rewrites any GET+payload
-request into a POST on the wire (confirmed with an echo-server test), and
-Ozonetel's route 405s on POST. Python's `requests` library sends the method
-exactly as given — confirmed working against the production endpoint via curl:
-GET + `apiKey` header + JSON body -> 200 with real data.
+Currently one report ships: `ozonetel-cdr-sync` — last 2 days of CDRs into the
+`Ozonetel` tab of the call-KPI sheet, every 5 minutes.
 
-## Files
+## How to add or change a scheduled report
 
-- `handler.py` — Lambda entry point.
-- `ozonetel_cdr.py` — pulls CDRs for the last N days, writes to the sheet.
-- `ozonetel_cdr.yaml` — declarative config: sheet target + pull window.
-  Matches the `scheduled_queries/*.yaml` pattern from data-pipelines — change
-  the target spreadsheet/tab/columns here, no code change needed.
-- `sheets_client.py` — gspread wrapper (flatten/truncate/batch-write).
-- `secrets.py` — reads the Google service account JSON from SSM Parameter Store.
+1. Drop a new file in `scheduled_reports/<report-name>.yaml`. Minimum shape:
 
-## Config
+   ```yaml
+   report_name: my-new-report
+   enabled: true
+   schedule:
+     # EventBridge: rate(...) or cron(...). cron is UTC — 07:15 UTC = 12:45 IST.
+     expression: rate(15 minutes)
+     timezone: Asia/Kolkata          # documentation only; EventBridge cron is UTC
+   ozonetel:
+     endpoint: https://in1-ccaas-api.ozonetel.com/ca_reports/fetchCDRDetails
+     days_back_routine: 2
+     days_back_full: 15
+     rate_limit_sleep_seconds: 31
+   sheet:
+     spreadsheet_id: 1WsTggC...      # from /d/<id>/edit in the sheet URL
+     worksheet_name: Ozonetel
+     start_cell: A1
+     include_headers: true
+     clear_before_write: true
+     columns:
+       preferred_order: [CallID, CallDate, StartTime]
+   notifications:
+     slack_webhook_param: /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url
+   ```
 
-**`ozonetel_cdr.yaml`** (declarative, checked into the repo):
-- `sheet.spreadsheet_id` / `sheet.worksheet_name` — where the data goes.
-- `sheet.columns.preferred_order` — column order written to the sheet.
-- `pull_window.days_back_routine` / `days_back_full` — how many days back a
-  routine run vs. a full backfill pulls.
+2. **Share the target sheet** with the service-account email
+   (`query-scheduler@leadzo-497107.iam.gserviceaccount.com`) as **Editor**.
+   Without this the Lambda gets a 403 from gspread.
 
-**Lambda environment variables** (secrets/deployment-specific, not in git):
-- `OZONETEL_API_KEY`, `OZONETEL_USERNAME` — Ozonetel account credentials.
-- `GOOGLE_SA_JSON_PARAM` — SSM parameter name holding the Google service
-  account JSON (`/leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json`).
+3. Commit + push to `main`. CI deploys the code and creates an EventBridge rule
+   `oz-prod-<report-name>` pointing at the Lambda.
+
+To change the cadence of an existing report, edit `schedule.expression` and
+push — `src/eventbridge_sync.py` updates the live rule to match. To turn one
+off, set `enabled: false` (or delete the file); the rule is removed.
+
+## The ship cadence (read this first)
+
+Follow this every time you add or change a report. Written so a teammate — or
+an AI agent — can do it end-to-end without guessing.
+
+1. **Check the field names you want actually exist** in the API response. Pull
+   one day by hand (see "Verify before trusting the schedule") and look at the
+   keys. Ozonetel returns 47 columns; anything you name in `preferred_order`
+   that the API doesn't return is silently written as an empty column.
+2. **Write the spec** in `scheduled_reports/<name>.yaml`.
+3. **Mind the pull window.** Ozonetel retains **15 days**. `days_back_routine`
+   is what a normal run pulls; `days_back_full` is the ceiling for a backfill.
+   Each day costs one API call plus a ~31s sleep (rate limit, below), so a
+   15-day backfill takes ~8 min — which exceeds the 300s Lambda timeout. Keep
+   the scheduled window small; run backfills as a deliberate one-off.
+4. **Share the sheet** with the service account as Editor (one-time per sheet).
+5. **Lint locally:** `python -m src.validate_specs` — catches bad schedule
+   expressions, windows beyond retention, missing sheet fields.
+6. **Commit + push.** CI deploys the code and reconciles the EventBridge rule.
+7. **Invoke it for real immediately** — do *not* wait for the schedule. See
+   below. If the sheet isn't shared, or a field name is wrong, you find out in
+   seconds.
+8. **Confirm the sheet actually changed**, not just that the run returned 200.
+
+Skip step 7 and the failure mode is quiet: the schedule fires, the run errors,
+the sheet keeps showing stale data, and unless the Slack webhook param is set,
+nobody is told.
+
+## Know your target: the Ozonetel API
+
+This is the part that cost the most time. All of it was verified by curl
+against production, not inferred from docs — the docs are wrong or misleading
+on two of these points.
+
+### `fetchCDRDetails` needs a literal GET carrying a JSON body
+
+```
+GET /ca_reports/fetchCDRDetails
+apiKey: <key>
+Content-Type: application/json
+
+{"fromDate":"2026-09-21 00:00:00","toDate":"2026-09-21 23:59:59","userName":"leadzo"}
+```
+
+GET-with-a-body is unusual but it is what the route requires. Sending the same
+fields as query-string parameters returns
+`{"status":"false","message":"Invalid Json Pass Valid Json"}`. Sending them as
+a POST body returns a 401 or a bare `405 Method Not Allowed`, depending on
+which headers are present.
+
+### Auth is the `apiKey` header — **not** a Bearer token
+
+The account *can* mint a token:
+
+```bash
+curl -X POST https://in1-ccaas-api.ozonetel.com/ca_reports/CAToken/generateToken \
+  -H 'apiKey: <key>' -H 'Content-Type: application/json' \
+  -d '{"userName":"leadzo"}'
+# -> 200 {"token":"eyJhbGciOiJIUzUxMiJ9..."}
+```
+
+That token is real and valid. `fetchCDRDetails` still rejects it:
+
+```
+401 {"status":"false","message":"Missing userName or apiKey"}
+```
+
+…even though `userName` is plainly in the body. **That error message is a
+generic auth failure, not a literal statement about missing fields.** Reading
+it literally sends you on a long hunt for a malformed request. Send the
+`apiKey` header and drop the `Authorization` header entirely and it works.
+
+### Why this is a Lambda and not a Google Apps Script
+
+The original version of this was an Apps Script bound to the sheet. It could
+never work, for a reason that has nothing to do with the code:
+
+**`UrlFetchApp` silently rewrites any GET request carrying a payload into a
+POST.** Proven by sending an identical request to an echo server:
+
+```javascript
+UrlFetchApp.fetch('https://httpbin.org/anything', {
+  method: 'get',                       // explicitly GET
+  payload: JSON.stringify({...}),
+  contentType: 'application/json',
+});
+// echo server reports:  "method": "POST"
+```
+
+Since Ozonetel's route requires a true GET and 405s on POST, Apps Script cannot
+call this endpoint at all. Python's `requests` sends the method exactly as
+given (`requests.request("GET", url, json=payload)`), which is why the sync
+lives here. Don't "simplify" this back into Apps Script.
+
+### Rate limit, retention, and day boundaries
+
+- **2 requests/minute** on `fetchCDRDetails`. `rate_limit_sleep_seconds: 31`
+  in the spec is the gap between per-day calls. Lower it and runs start failing.
+- **15 days** of retention. Older dates return empty, not an error.
+- **`fromDate` and `toDate` must be the same calendar day.** The API serves one
+  day per call; that's why the code loops day-by-day rather than passing a range.
+
+### The response shape
+
+47 columns per record, in this order:
+
+```
+CallID, CallDate, StartTime, EndTime, Duration, TalkTime, HandlingTime,
+CallerID, DialedNumber, E164, DID, Location, AgentID, AgentName, Skill,
+CampaignName, CallFlow, Type, Status, DialStatus, AgentDialStatus,
+CustomerDialStatus, Disposition, Comments, HangupBy, QueueTime, HoldDuration,
+WrapupDuration, TimeToAnswer, DialCount, UCID, UUI, CallAudio,
+CallerConfAudioFile, ConferenceDuration, CustomerRingTime, DialOutName,
+DynamicDID, Event, PickupTime, Rating, RatingComments, TransferType,
+TransferredTo, VideoRecordingURL, WrapUpEndTime, WrapUpStartTime
+```
+
+Durations are `HH:MM:SS` strings, not seconds — a sheet formula summing them
+needs to parse, not add. `Status` is `Answered` / `Unanswered`; the finer-grained
+outcome is in `DialStatus` / `AgentDialStatus` / `CustomerDialStatus`.
+`Disposition` is only populated if agents actually set one in CloudAgent.
+
+## Writing the spec
+
+### `ozonetel` block
+
+| Field | Meaning |
+|---|---|
+| `endpoint` | Full URL. Domestic: `in1-ccaas-api.ozonetel.com`; international: `api.ccaas.ozonetel.com`. |
+| `days_back_routine` | Days pulled on a normal run. 2 picks up late-arriving/updated records without re-pulling everything. |
+| `days_back_full` | Ceiling for `full_backfill: true` invokes. Cannot exceed 15 (validator rejects it). |
+| `rate_limit_sleep_seconds` | Gap between per-day calls. Keep ≥31 for the 2 req/min limit. |
+
+Credentials are **not** in the spec — `OZONETEL_API_KEY` / `OZONETEL_USERNAME`
+are Lambda environment variables, injected by CI from GitHub secrets.
+
+### `sheet` block
+
+| Field | Meaning |
+|---|---|
+| `spreadsheet_id` | From the sheet URL: `/spreadsheets/d/<id>/edit`. |
+| `worksheet_name` | Tab name. Created if missing. |
+| `start_cell` | Top-left of the written range, usually `A1`. |
+| `include_headers` | Write a header row from the resolved column list. |
+| `clear_before_write` | `true` = wipe the tab first (this is a snapshot, not an append log). |
+| `columns.preferred_order` | Column order. Any API field not listed here is appended alphabetically after these; any listed field the API doesn't return becomes an empty column. |
+
+Cells are clamped to 50,000 characters (`src/sheets_client.py`) because Sheets
+rejects the entire write if one cell exceeds it.
+
+## Verify before trusting the schedule
+
+Step 7 of the cadence, and the habit that matters most. A real invoke runs the
+whole path including the sheet write — there is no dry-run mode here (unlike
+query-scheduler, there's no expensive database to protect, and the thing you
+actually need to verify *is* the sheet write).
+
+```bash
+aws lambda invoke --profile leadzo --region ap-south-1 \
+  --function-name ozonetel-cdr-proxy-poc \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"report_name":"ozonetel-cdr-sync"}' \
+  /tmp/out.json && cat /tmp/out.json
+```
+
+Reading the result:
+
+- `{"status":"success","rows_read":N,"rows_written":N}` → working. Check the
+  tab actually changed.
+- `Ozonetel API error ... Missing userName or apiKey` → auth. `OZONETEL_API_KEY`
+  is wrong/unset, or something re-added an `Authorization` header.
+- `Ozonetel HTTP 429` / repeated failures partway through a multi-day pull →
+  rate limit; raise `rate_limit_sleep_seconds`.
+- `gspread.exceptions.APIError: [403]` → the sheet isn't shared with the
+  service account as Editor.
+- `rows_read: 0` for every day → check the dates. Beyond 15 days back returns
+  empty rather than erroring.
+
+Backfill the full retention window:
+
+```bash
+aws lambda invoke --profile leadzo --region ap-south-1 \
+  --function-name ozonetel-cdr-proxy-poc \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"report_name":"ozonetel-cdr-sync","full_backfill":true}' \
+  /tmp/out.json && cat /tmp/out.json
+```
+
+15 days × ~31s of sleeping is ~8 minutes, which **exceeds the 300s Lambda
+timeout**. Raise the timeout temporarily, or backfill in chunks, before relying
+on this.
+
+Read logs for a failed scheduled run:
+
+```bash
+aws logs filter-log-events --profile leadzo --region ap-south-1 \
+  --log-group-name /aws/lambda/ozonetel-cdr-proxy-poc \
+  --filter-pattern '"failure"' \
+  --start-time $(( ($(date +%s) - 3600) * 1000 )) \
+  --query 'events[].message' --output text
+```
+
+## One-time AWS setup (already done — for reference)
+
+Account `018100542607`, region `ap-south-1`.
+
+### SSM parameters
+
+| Path | Type | Purpose |
+|---|---|---|
+| `/leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json` | SecureString | Google service account JSON (whole file). Copied from the query-scheduler's param — same SA. |
+| `/leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url` | SecureString | Slack webhook for failure alerts. **Not yet created** — alerts silently no-op until it is. |
+
+```bash
+aws ssm put-parameter --profile leadzo --region ap-south-1 \
+  --name <path> --type SecureString --value "file://<file>" --overwrite
+```
+
+### Lambda
+
+`ozonetel-cdr-proxy-poc` — python3.12, handler `src.handler.handle`, 512 MB,
+300s timeout, **reserved concurrency 1** (every run clears and rewrites the
+same worksheet; two concurrent runs would race on the same range).
+
+Environment variables:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `OZONETEL_API_KEY` | yes | Ozonetel API key. Injected by CI from a GitHub secret. |
+| `OZONETEL_USERNAME` | yes | CloudAgent account name (`leadzo`). |
+| `GOOGLE_SA_JSON_PARAM` | yes | Full SSM path of the service account JSON. |
+| `SSM_PARAMETER_PREFIX` | no | Only used as a fallback by `parameter_name()` when an explicit `*_PARAM` var is absent. Not set today, because `GOOGLE_SA_JSON_PARAM` is. |
+| `ENVIRONMENT` | no | Stamped into logs; defaults to `prod`, and EventBridge passes it in the event anyway. |
+| `GIT_SHA` | no | Stamped into logs. Set by CI; reads `unknown` on manual deploys. |
+
+Execution role `ozonetel-cdr-proxy-poc-role`: `AWSLambdaBasicExecutionRole`
+plus `ssm:GetParameter` on the prefix and `kms:Decrypt` on the SSM key.
+
+### EventBridge
+
+Rules are **not** created by hand — `src/eventbridge_sync.py` reconciles them
+from `scheduled_reports/*.yaml` on every CI run. Rules are named
+`oz-<environment>-<report-name>`, tagged `ManagedBy=ozonetel-report-ci`, and
+carry an input of `{"report_name": "...", "environment": "..."}`. A rule whose
+spec is deleted or disabled is removed, along with its Lambda invoke permission.
+
+Run it by hand if needed:
+
+```bash
+python -m src.eventbridge_sync \
+  --environment prod \
+  --lambda-arn arn:aws:lambda:ap-south-1:018100542607:function:ozonetel-cdr-proxy-poc \
+  --lambda-function-name ozonetel-cdr-proxy-poc \
+  --dry-run          # drop --dry-run to apply
+```
+
+### GitHub Actions OIDC role — ⚠️ currently broken
+
+`arn:aws:iam::018100542607:role/ozonetel-cdr-proxy-poc-github-actions-role`,
+trusting `repo:Leadzo-tech/ozontel-report:ref:refs/heads/main` with audience
+`sts.amazonaws.com`. Inline policy `ozonetel-cdr-proxy-poc-deploy` grants only
+Lambda code/config update on this one function and EventBridge rule management.
+
+**CI deploys currently fail** at the credentials step with:
+
+```
+Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+Ruled out: trust policy content (byte-matches the working query-scheduler
+role's shape), the OIDC provider (shared with query-scheduler, correct audience
+and thumbprint), IAM propagation delay (still failing 15+ min after creation),
+repo/branch names, and repo-level Actions settings (public repo, Actions
+enabled).
+
+Most likely remaining cause: the **Leadzo-tech org customises the OIDC subject
+claim template**, so the real `sub` doesn't match the default
+`repo:<org>/<repo>:ref:refs/heads/<branch>` shape the trust policy expects.
+Checking that needs `admin:org`. Either confirm the template and match it, or
+widen the condition to `repo:Leadzo-tech/ozontel-report:*`.
+
+**Until this is fixed, deploy manually** (see below). Everything else in the
+pipeline — validation, tests, build — works.
+
+## One-time GCP setup (already done — for reference)
+
+Project `leadzo-497107`, service account
+`query-scheduler@leadzo-497107.iam.gserviceaccount.com` — deliberately the
+*same* SA the query-scheduler uses, so there's one Google identity to share
+sheets with, not two.
+
+1. **Service account JSON key** lives in SSM at
+   `/leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json` as a `SecureString`.
+2. **APIs enabled** in the project: Google Sheets API, Google Drive API.
+3. **Each target sheet** shared with the SA email as **Editor**.
 
 ## Deploy
 
-Push to `main` — `.github/workflows/deploy.yml` runs `pytest`, builds the
-Lambda zip, deploys it via OIDC (role `ozonetel-cdr-proxy-poc-github-actions-role`,
-no long-lived AWS keys), and reconciles the `ozonetel-cdr-sync-hourly`
-EventBridge rule. Requires the repo secrets `OZONETEL_API_KEY` and
-`OZONETEL_USERNAME` to be set (`gh secret set ... --repo Leadzo-tech/ozontel-report`).
+### Via CI (intended path — blocked, see the OIDC note above)
 
-`template.yaml` documents the current live shape of the function for
-reference — it is **not** deployed by CI or meant to be `sam deploy`'d, since
-the real resources were created manually and stay CLI/CI-managed (see the
-comment at the top of that file).
+Push to `main`. `.github/workflows/deploy-prod.yml` runs two jobs: `validate`
+(spec lint + pytest) and `deploy` (build zip → `update-function-code` → merge
+`GIT_SHA` and Ozonetel creds into env vars → `python -m src.eventbridge_sync`).
 
-Manual deploy (fallback, e.g. for local debugging without waiting on CI):
+Requires repo secrets `OZONETEL_API_KEY` and `OZONETEL_USERNAME`:
 
 ```bash
-pip install --target build -r requirements.txt \
-  --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
-  --only-binary=:all:
-cp handler.py ozonetel_cdr.py sheets_client.py secrets.py ozonetel_cdr.yaml build/
-(cd build && zip -qr ../function.zip .)
-aws lambda update-function-code --function-name ozonetel-cdr-proxy-poc \
-  --zip-file fileb://function.zip --region ap-south-1
+gh secret set OZONETEL_API_KEY --repo Leadzo-tech/ozontel-report --body '<key>'
+gh secret set OZONETEL_USERNAME --repo Leadzo-tech/ozontel-report --body 'leadzo'
 ```
 
-## Tests
+### Manual (current working path)
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+rm -rf build lambda.zip && mkdir build
+pip install -r requirements.txt -t build/ \
+  --platform manylinux2014_x86_64 --only-binary=:all: \
+  --python-version 3.12 --implementation cp --abi cp312
+cp -r src scheduled_reports build/
+(cd build && zip -qr ../lambda.zip . -x "*/__pycache__/*" "__pycache__/*")
+aws lambda update-function-code --profile leadzo --region ap-south-1 \
+  --function-name ozonetel-cdr-proxy-poc --zip-file fileb://lambda.zip
+aws lambda wait function-updated --profile leadzo --region ap-south-1 \
+  --function-name ozonetel-cdr-proxy-poc
+```
+
+`template.yaml` documents the function's shape for reference. It is **not**
+deployed — the live resources were created by CLI and `sam deploy` would try to
+create a colliding stack. See the comment at the top of that file.
+
+## Local development
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
 pytest -q
+python -m src.validate_specs    # lints every YAML in scheduled_reports/
 ```
 
-## Schedule
+Tests are pure — no AWS calls, no network, no credentials needed.
 
-EventBridge rule `ozonetel-cdr-sync-hourly` (`rate(5 minutes)`) targets this
-function directly, reconciled idempotently by the deploy workflow on every
-push to `main`.
+## Operations
+
+- **Logs:** CloudWatch group `/aws/lambda/ozonetel-cdr-proxy-poc`. Every run
+  emits JSON events (`start`, `ozonetel_fetch` per day, `success` / `failure`)
+  stamped with `report_name`, `environment`, `git_sha`, and `spec_hash`.
+- **Failure alerts** go to the Slack webhook at
+  `notifications.slack_webhook_param`. That parameter does not exist yet, so
+  alerts currently no-op silently — create it to turn them on.
+- **Schedules** are EventBridge rules `oz-prod-<report-name>`, reconciled from
+  `scheduled_reports/*.yaml` on every CI run.
+- **Concurrency** is capped at 1. If a run ever exceeds the 5-minute interval,
+  the next invoke is throttled rather than racing it. Throttles show up as the
+  `Throttles` metric on the function.
+- **This is a snapshot, not a log.** Every run clears the tab and rewrites the
+  last `days_back_routine` days. Don't add manual columns to that tab — they
+  will be wiped. Build derived views in a separate tab referencing this one.
+
+## Repo layout
+
+```
+src/
+  handler.py              # Lambda entry — dispatch on report_name, alert on failure
+  ozonetel_cdr.py         # the API pull + sheet write, driven by the spec
+  report_registry.py      # YAML loader + schema validator + spec_hash
+  eventbridge_sync.py     # CLI reconciler invoked from CI
+  sheets_client.py        # gspread overwrite + document flattener
+  secrets.py              # SSM parameter fetch helpers
+  slack.py                # Slack webhook on failure
+  logging_utils.py        # JSON log formatter
+  validate_specs.py       # CI hook for YAML lint
+scheduled_reports/        # ← add your specs here
+template.yaml             # SAM/CFN template (reference only, not deployed)
+samconfig.toml            # SAM deploy params
+.github/workflows/deploy-prod.yml   # CI: validate → build → update-function-code → eventbridge_sync
+```

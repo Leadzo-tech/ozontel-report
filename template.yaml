@@ -1,15 +1,26 @@
-# NOTE: descriptive only — NOT deployed by CI or by any script in this repo.
+# NOTE: descriptive only — NOT deployed by CI.
 #
-# ozonetel-cdr-proxy-poc, its execution role, and the ozonetel-cdr-sync-hourly
-# EventBridge rule were created manually via the AWS CLI and stay CLI/CI
-# managed (see .github/workflows/deploy.yml). This file documents their
-# current shape for readability, mirroring data-pipelines/template.yaml, but
-# running `sam deploy` against it would attempt to create a *new* stack that
-# collides with those already-existing resources. Don't deploy this without
-# first importing the existing resources into the stack.
+# ozonetel-cdr-proxy-poc, its execution role, and its EventBridge rule were
+# created via the AWS CLI and stay CLI/CI-managed (code by
+# .github/workflows/deploy-prod.yml, schedules by src/eventbridge_sync.py).
+# This file documents their current shape, mirroring data-pipelines/template.yaml.
+# Running `sam deploy` against it would try to create a *new* stack colliding
+# with those existing resources — import them first if you ever adopt SAM here.
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Ozonetel CDR -> Google Sheet sync (reference only, not deployed).
+Description: Ozonetel CDR -> Google Sheets report worker (reference only, not deployed).
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [prod]
+  SsmParameterPrefix:
+    Type: String
+    Default: /leadzo/ozonetel-cdr-proxy-poc/poc
+  GitSha:
+    Type: String
+    Default: unknown
 
 Globals:
   Function:
@@ -17,38 +28,41 @@ Globals:
     Architectures: [x86_64]
     MemorySize: 512
     Timeout: 300
-    ReservedConcurrentExecutions: 1
+    LoggingConfig:
+      LogFormat: Text
 
 Resources:
-  OzonetelCdrProxy:
+  OzonetelReportWorker:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: ozonetel-cdr-proxy-poc
       CodeUri: .
-      Handler: handler.handler
+      Handler: src.handler.handle
+      # One run must never overlap the next — every run clears and rewrites the
+      # same worksheet, so two concurrent runs would race on the same range.
+      ReservedConcurrentExecutions: 1
       Environment:
         Variables:
+          ENVIRONMENT: !Ref Environment
+          SSM_PARAMETER_PREFIX: !Ref SsmParameterPrefix
+          GOOGLE_SA_JSON_PARAM: !Sub ${SsmParameterPrefix}/google/sa-json
           OZONETEL_USERNAME: leadzo
-          GOOGLE_SA_JSON_PARAM: /leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json
-          # OZONETEL_API_KEY is set out-of-band (CI secret / manual), never here.
+          GIT_SHA: !Ref GitSha
+          # OZONETEL_API_KEY is injected by CI from a GitHub secret, never here.
       Policies:
         - Statement:
             - Effect: Allow
               Action:
                 - ssm:GetParameter
-              Resource: arn:aws:ssm:ap-south-1:018100542607:parameter/leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json
+                - ssm:GetParameters
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}/*
             - Effect: Allow
               Action:
                 - kms:Decrypt
-              Resource: arn:aws:kms:ap-south-1:018100542607:key/4aaee9b5-de9d-43ad-be4a-51ff1e7ce70f
-      Events:
-        HourlySchedule:
-          Type: Schedule
-          Properties:
-            Name: ozonetel-cdr-sync-hourly
-            Schedule: rate(5 minutes)
-            Enabled: true
+              Resource: "*"
 
 Outputs:
-  FunctionArn:
-    Value: !GetAtt OzonetelCdrProxy.Arn
+  OzonetelReportWorkerArn:
+    Value: !GetAtt OzonetelReportWorker.Arn
+  OzonetelReportWorkerName:
+    Value: !Ref OzonetelReportWorker

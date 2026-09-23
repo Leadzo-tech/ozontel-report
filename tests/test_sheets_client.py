@@ -1,4 +1,4 @@
-from sheets_client import (
+from src.sheets_client import (
     MAX_CELL_CHARS,
     compute_columns,
     flatten_document,

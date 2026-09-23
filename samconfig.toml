@@ -1,0 +1,9 @@
+version = 0.1
+
+[prod.deploy.parameters]
+stack_name = "ozonetel-cdr-proxy-poc"
+region = "ap-south-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = false
+fail_on_empty_changeset = false

@@ -1,5 +1,6 @@
+*.pyc
+__pycache__/
 build/
 function.zip
-__pycache__/
-*.pyc
 iac/
+lambda.zip
