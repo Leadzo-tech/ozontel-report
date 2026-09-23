@@ -89,11 +89,31 @@ jobs:
           current=$(aws lambda get-function-configuration \
             --function-name "$FUNCTION_NAME" \
             --query 'Environment.Variables' --output json)
-          echo "$current" | jq \
-            --arg sha "$GITHUB_SHA" \
-            --arg ozkey "$OZONETEL_API_KEY" \
-            --arg ozuser "$OZONETEL_USERNAME" \
-            '. + {GIT_SHA: $sha, OZONETEL_API_KEY: $ozkey, OZONETEL_USERNAME: $ozuser} | {Variables: .}' > /tmp/env.json
+
+          # An --environment update REPLACES every variable, so anything not
+          # re-sent is erased. If a secret is unset in the repo it expands to
+          # "", which would silently blank the live credential and take the
+          # function down while the deploy still reports success. So: only
+          # overwrite a credential when we actually have a value for it.
+          updated=$(echo "$current" | jq --arg sha "$GITHUB_SHA" '. + {GIT_SHA: $sha}')
+          for var in OZONETEL_API_KEY OZONETEL_USERNAME; do
+            value="${!var}"
+            if [ -n "$value" ]; then
+              updated=$(echo "$updated" | jq --arg k "$var" --arg v "$value" '. + {($k): $v}')
+            else
+              echo "::warning::secret $var is not set — keeping the function's existing value"
+            fi
+          done
+
+          # Refuse to ship a function that cannot run, rather than "succeeding".
+          for var in OZONETEL_API_KEY OZONETEL_USERNAME; do
+            if [ -z "$(echo "$updated" | jq -r --arg k "$var" '.[$k] // ""')" ]; then
+              echo "::error::$var would be empty after this deploy — set the repo secret or the function's env var"
+              exit 1
+            fi
+          done
+
+          echo "$updated" | jq '{Variables: .}' > /tmp/env.json
           aws lambda update-function-configuration \
             --function-name "$FUNCTION_NAME" \
             --environment file:///tmp/env.json > /dev/null
