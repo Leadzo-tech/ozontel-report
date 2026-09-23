@@ -27,7 +27,8 @@ Globals:
     Runtime: python3.12
     Architectures: [x86_64]
     MemorySize: 512
-    Timeout: 300
+    # 900s (the max) so a full_backfill — 16 days x ~31s rate-limit sleep — fits.
+    Timeout: 900
     LoggingConfig:
       LogFormat: Text
 

@@ -116,6 +116,20 @@ def validate_report_spec(spec: ReportSpec) -> None:
     for key in ["spreadsheet_id", "worksheet_name", "start_cell"]:
         if not sheet.get(key):
             raise ReportSpecError(f"{spec.path}: sheet.{key} is required")
+    write_mode = sheet.get("write_mode", "overwrite")
+    if write_mode not in ("overwrite", "merge"):
+        raise ReportSpecError(f"{spec.path}: sheet.write_mode must be 'overwrite' or 'merge'")
+    if write_mode == "merge":
+        merge_key = sheet.get("merge_key")
+        if not merge_key:
+            raise ReportSpecError(f"{spec.path}: sheet.merge_key is required when write_mode is 'merge'")
+        if projection and merge_key not in projection:
+            raise ReportSpecError(
+                f"{spec.path}: sheet.merge_key must be a column (left side) of ozonetel.projection"
+            )
+        # merge reads the existing rows back by header name from A1.
+        if sheet["start_cell"] != "A1" or not sheet.get("include_headers", True):
+            raise ReportSpecError(f"{spec.path}: write_mode 'merge' needs start_cell A1 and include_headers true")
 
     # With a projection the column order is the projection's own order; a
     # second list would just be a thing to forget to update.

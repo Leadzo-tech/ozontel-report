@@ -116,6 +116,7 @@ jobs:
           echo "$updated" | jq '{Variables: .}' > /tmp/env.json
           aws lambda update-function-configuration \
             --function-name "$FUNCTION_NAME" \
+            --timeout 900 \
             --environment file:///tmp/env.json > /dev/null
           aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 

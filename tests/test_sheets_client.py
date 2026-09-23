@@ -2,6 +2,7 @@ from src.sheets_client import (
     MAX_CELL_CHARS,
     compute_columns,
     flatten_document,
+    merge_rows,
     rows_to_values,
     truncate_cell,
 )
@@ -50,3 +51,18 @@ def test_rows_to_values_fills_missing_fields_with_empty_string():
     columns, values = rows_to_values(rows, preferred_order=["CallID", "Status"])
     assert columns == ["CallID", "Status"]
     assert values == [[1, "Answered"], [2, ""]]
+
+
+def test_merge_rows_keeps_history_updates_in_place_and_appends_new():
+    existing = [["CallID", "Status"], ["1", "Unanswered"], ["2", "Answered"]]
+    new = [{"CallID": 2, "Status": "Transferred"}, {"CallID": 3, "Status": "Answered"}]
+    merged = merge_rows(existing, new, "CallID")
+    assert merged == [
+        {"CallID": "1", "Status": "Unanswered"},
+        {"CallID": 2, "Status": "Transferred"},
+        {"CallID": 3, "Status": "Answered"},
+    ]
+
+
+def test_merge_rows_on_empty_sheet_returns_new_rows():
+    assert merge_rows([], [{"CallID": 1}], "CallID") == [{"CallID": 1}]

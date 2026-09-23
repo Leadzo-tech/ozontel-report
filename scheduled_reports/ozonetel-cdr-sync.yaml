@@ -53,21 +53,13 @@ ozonetel:
     WrapupDuration: WrapupDuration
     TimeToAnswer: TimeToAnswer
     DialCount: DialCount
-    UCID: UCID
     UUI: UUI
     CallAudio: CallAudio
     CallerConfAudioFile: CallerConfAudioFile
     ConferenceDuration: ConferenceDuration
     CustomerRingTime: CustomerRingTime
-    DialOutName: DialOutName
-    DynamicDID: DynamicDID
     Event: Event
     PickupTime: PickupTime
-    Rating: Rating
-    RatingComments: RatingComments
-    TransferType: TransferType
-    TransferredTo: TransferredTo
-    VideoRecordingURL: VideoRecordingURL
     WrapUpEndTime: WrapUpEndTime
     WrapUpStartTime: WrapUpStartTime
 sheet:
@@ -75,6 +67,9 @@ sheet:
   worksheet_name: Ozonetel
   start_cell: A1
   include_headers: true
-  clear_before_write: true
+  # merge: keep every row already on the sheet and upsert fresh records by
+  # CallID, so history builds up past Ozonetel's 15-day retention.
+  write_mode: merge
+  merge_key: CallID
 notifications:
   slack_webhook_param: /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url

@@ -48,17 +48,88 @@ def rows_to_values(rows: list[dict[str, Any]], preferred_order: list[str] | None
     return columns, values
 
 
+def merge_rows(
+    existing_values: list[list[Any]], new_rows: list[dict[str, Any]], key: str
+) -> list[dict[str, Any]]:
+    """Upsert new_rows into the rows already on the sheet (header row first).
+
+    Existing rows keep their position; a new row whose key matches replaces it
+    in place, anything else is appended. Rows with no key are always appended.
+    """
+    merged: list[dict[str, Any]] = []
+    index: dict[str, int] = {}
+    if existing_values:
+        header = existing_values[0]
+        for raw in existing_values[1:]:
+            row = {name: value for name, value in zip(header, raw) if name}
+            row_key = str(row.get(key, ""))
+            if row_key:
+                index[row_key] = len(merged)
+            merged.append(row)
+    for row in (flatten_document(r) for r in new_rows):
+        row_key = str(row.get(key, ""))
+        if row_key and row_key in index:
+            merged[index[row_key]] = row
+        else:
+            if row_key:
+                index[row_key] = len(merged)
+            merged.append(row)
+    return merged
+
+
 class SheetWriter:
     def __init__(self, service_account_info: dict[str, Any]):
         self.client = gspread.service_account_from_dict(service_account_info)
 
-    def overwrite(self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def _worksheet(self, sheet_spec: dict[str, Any]) -> gspread.Worksheet:
         spreadsheet = self.client.open_by_key(sheet_spec["spreadsheet_id"])
         worksheet_name = sheet_spec["worksheet_name"]
         try:
-            worksheet = spreadsheet.worksheet(worksheet_name)
+            return spreadsheet.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=26)
+            return spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=26)
+
+    def write(self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if sheet_spec.get("write_mode", "overwrite") == "merge":
+            return self.merge(sheet_spec, rows)
+        return self.overwrite(sheet_spec, rows)
+
+    def merge(self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Keep every row already on the sheet and upsert `rows` by merge_key,
+        so history accumulates beyond Ozonetel's 15-day retention.
+
+        Never clears the sheet: if a write fails partway, the old rows are still
+        there (possibly with some already updated) rather than wiped."""
+        worksheet = self._worksheet(sheet_spec)
+        # Unformatted, so a long numeric CallID comes back as 1234567890123456
+        # rather than "1.23457E+15" and still matches on upsert.
+        existing = worksheet.get_values(value_render_option=gspread.utils.ValueRenderOption.unformatted)
+        merged = merge_rows(existing, rows, sheet_spec["merge_key"])
+
+        preferred = sheet_spec.get("columns", {}).get("preferred_order", [])
+        if preferred:
+            # Old rows carry whatever columns the sheet had; with a fixed column
+            # list, a column removed from it must disappear from history too.
+            merged = [{column: row.get(column, "") for column in preferred} for row in merged]
+        columns, values = rows_to_values(merged, preferred)
+        payload: list[list[Any]] = [columns, *values]
+        # Grow first so the write fits, then shrink to trim columns that were
+        # dropped. Rows only ever grow.
+        worksheet.resize(
+            rows=max(worksheet.row_count, len(payload)), cols=max(worksheet.col_count, len(columns))
+        )
+        for i in range(0, len(payload), _WRITE_BATCH_SIZE):
+            worksheet.update(payload[i:i + _WRITE_BATCH_SIZE], f"A{1 + i}", value_input_option="RAW")
+        worksheet.resize(rows=len(payload), cols=len(columns))
+
+        return {
+            "rows_written": len(values),
+            "columns_written": columns,
+            "range": f"A1:{len(payload)}x{len(columns)}",
+        }
+
+    def overwrite(self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+        worksheet = self._worksheet(sheet_spec)
 
         preferred = sheet_spec.get("columns", {}).get("preferred_order", [])
         columns, values = rows_to_values(rows, preferred)

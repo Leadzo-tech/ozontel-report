@@ -1,7 +1,7 @@
 """Ozonetel CDR -> Google Sheet sync.
 
-Pulls call detail records from Ozonetel's fetchCDRDetails API and overwrites
-the target worksheet. Everything configurable (endpoint, pull window, sheet
+Pulls call detail records from Ozonetel's fetchCDRDetails API and writes them
+to the target worksheet (overwrite, or merge by CallID to keep history). Everything configurable (endpoint, pull window, sheet
 target, column order) comes from the spec in scheduled_reports/.
 
 Two things about Ozonetel's API drive the shape of this code, both verified
@@ -85,14 +85,15 @@ def run(spec_raw: dict[str, Any], api_key: str, username: str, full_backfill: bo
     all_records: list[dict] = []
     per_day_counts: dict[str, int] = {}
 
-    for i in range(days_back, 0, -1):
+    # i == 0 is today, so the sheet includes calls made so far today.
+    for i in range(days_back, -1, -1):
         date_str = _days_ago_str(i)
         records = _fetch_day(endpoint, date_str, api_key, username)
         per_day_counts[date_str] = len(records)
         all_records.extend(records)
         log_event("ozonetel_fetch", date=date_str, records=len(records))
         # Ozonetel rate-limits fetchCDRDetails to 2 requests/minute.
-        if i > 1:
+        if i > 0:
             time.sleep(sleep_seconds)
 
     sheet_spec = spec_raw["sheet"]
@@ -107,11 +108,11 @@ def run(spec_raw: dict[str, Any], api_key: str, username: str, full_backfill: bo
         }
 
     google_sa_json = get_json_parameter(parameter_name("GOOGLE_SA_JSON_PARAM", "google/sa-json"))
-    sheet_result = SheetWriter(google_sa_json).overwrite(sheet_spec, all_records)
+    sheet_result = SheetWriter(google_sa_json).write(sheet_spec, all_records)
 
     return {
         "status": "success",
-        "days_pulled": days_back,
+        "days_pulled": len(per_day_counts),
         "per_day_counts": per_day_counts,
         "rows_read": len(all_records),
         "rows_written": sheet_result["rows_written"],

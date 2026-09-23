@@ -8,7 +8,8 @@ worksheet with them. On every push to `main`, CI builds the Lambda code,
 deploys it, and reconciles EventBridge rules so the schedules declared in YAML
 match what's live in AWS. Push to `main` is the only step you need.
 
-Currently one report ships: `ozonetel-cdr-sync` — last 2 days of CDRs into the
+Currently one report ships: `ozonetel-cdr-sync` — pulls the last 2 days plus
+today and merges them (by `CallID`) into the full call history in the
 `Ozonetel` tab of the call-KPI sheet, every 5 minutes.
 
 Before changing anything, read two sections: **"Know your target: the Ozonetel
@@ -71,8 +72,9 @@ an AI agent — can do it end-to-end without guessing.
 3. **Mind the pull window.** Ozonetel retains **15 days**. `days_back_routine`
    is what a normal run pulls; `days_back_full` is the ceiling for a backfill.
    Each day costs one API call plus a ~31s sleep (rate limit, below), so a
-   15-day backfill takes ~8 min — which exceeds the 300s Lambda timeout. Keep
-   the scheduled window small; run backfills as a deliberate one-off.
+   15-day backfill takes ~8 min (CI sets the Lambda timeout to 900s so it
+   fits). Keep the scheduled window small; run backfills as a deliberate
+   one-off.
 4. **Share the sheet** with the service account as Editor (one-time per sheet).
 5. **Lint locally:** `python -m src.validate_specs` — catches bad schedule
    expressions, windows beyond retention, missing sheet fields.
@@ -203,7 +205,9 @@ are Lambda environment variables, injected by CI from GitHub secrets.
 | `worksheet_name` | Tab name. Created if missing. |
 | `start_cell` | Top-left of the written range, usually `A1`. |
 | `include_headers` | Write a header row from the resolved column list. |
-| `clear_before_write` | `true` = wipe the tab first (this is a snapshot, not an append log). |
+| `write_mode` | `overwrite` (default) = rewrite the tab with just this run's rows. `merge` = keep every row already on the tab and upsert this run's rows by `merge_key`, so history accumulates past Ozonetel's 15-day retention. Columns dropped from the projection are dropped from old rows too. |
+| `merge_key` | Column (projection output name) that identifies a record in `merge` mode, e.g. `CallID`. |
+| `clear_before_write` | `overwrite` mode only: `true` = wipe the tab first. |
 | `columns.preferred_order` | Only for specs with no `projection`: orders these fields first, then appends every other field the API returned, alphabetically. Setting both is rejected. |
 
 ### Columns: adding, removing, renaming
@@ -237,7 +241,7 @@ failing, so the sheet's shape stays fixed whatever a given day's data contains.
 Changing columns needs a **deploy** (the spec ships inside the Lambda zip) —
 unlike `schedule.expression`, which the reconciler applies on its own.
 
-**Don't edit headers in the sheet directly** — `clear_before_write: true`
+**Don't edit headers in the sheet directly** — every run
 rewrites row 1 from this config every run, so manual edits last ~5 minutes.
 
 Cells are clamped to 50,000 characters (`src/sheets_client.py`) because Sheets
@@ -281,9 +285,8 @@ aws lambda invoke --profile leadzo --region ap-south-1 \
   /tmp/out.json && cat /tmp/out.json
 ```
 
-15 days × ~31s of sleeping is ~8 minutes, which **exceeds the 300s Lambda
-timeout**. Raise the timeout temporarily, or backfill in chunks, before relying
-on this.
+15 days × ~31s of sleeping is ~8 minutes; CI sets the Lambda timeout to 900s
+so this fits. With `write_mode: merge` it adds to the history, never replaces it.
 
 Read logs for a failed scheduled run:
 
@@ -299,9 +302,10 @@ aws logs filter-log-events --profile leadzo --region ap-south-1 \
 
 Spreadsheet `1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0`
 ([open](https://docs.google.com/spreadsheets/d/1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0/edit)),
-tab **`Ozonetel`**. That tab is a machine-owned snapshot: every run clears it
-and rewrites the last `days_back_routine` days. Anything hand-added there is
-destroyed on the next run — build derived views in *other* tabs that reference
+tab **`Ozonetel`**. That tab is machine-owned: every run reads it back, merges
+in the last `days_back_routine` days plus today by `CallID`, and rewrites it.
+It is the only copy of calls older than Ozonetel's 15 days — don't delete rows
+there. Hand-edited cells are overwritten on the next run — build derived views in *other* tabs that reference
 it.
 
 **Known issue, not caused by this service:** the `KPI Dashboard` tab in the
@@ -370,7 +374,7 @@ CloudAgent admin panel. The CloudAgent setting **API Authentication must be
 ### Lambda
 
 `ozonetel-cdr-proxy-poc` — python3.12, handler `src.handler.handle`, 512 MB,
-300s timeout, **reserved concurrency 1** (every run clears and rewrites the
+900s timeout, **reserved concurrency 1** (every run reads and rewrites the
 same worksheet; two concurrent runs would race on the same range).
 
 Environment variables:
@@ -534,9 +538,9 @@ Tests are pure — no AWS calls, no network, no credentials needed.
 - **Concurrency** is capped at 1. If a run ever exceeds the 5-minute interval,
   the next invoke is throttled rather than racing it. Throttles show up as the
   `Throttles` metric on the function.
-- **This is a snapshot, not a log.** Every run clears the tab and rewrites the
-  last `days_back_routine` days. Don't add manual columns to that tab — they
-  will be wiped. Build derived views in a separate tab referencing this one.
+- **This is a log, not a snapshot.** Every run merges the last
+  `days_back_routine` days plus today into the existing rows by `CallID`. Don't
+  add manual columns to that tab — they will be dropped. Build derived views in a separate tab referencing this one.
 
 ## Repo layout
 
