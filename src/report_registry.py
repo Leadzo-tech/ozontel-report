@@ -81,6 +81,16 @@ def validate_report_spec(spec: ReportSpec) -> None:
     expression = str(schedule["expression"])
     if not (expression.startswith("cron(") or expression.startswith("rate(")):
         raise ReportSpecError(f"{spec.path}: schedule.expression must be EventBridge cron(...) or rate(...)")
+    extra_runs = schedule.get("extra_runs") or []
+    if not isinstance(extra_runs, list):
+        raise ReportSpecError(f"{spec.path}: schedule.extra_runs must be a list")
+    for run in extra_runs:
+        if not isinstance(run, dict) or not run.get("id") or not run.get("expression"):
+            raise ReportSpecError(f"{spec.path}: each schedule.extra_runs entry needs id and expression")
+        if not all(c.isalnum() or c == "-" for c in str(run["id"])):
+            raise ReportSpecError(f"{spec.path}: schedule.extra_runs id may contain only letters, numbers and '-'")
+        if not str(run["expression"]).startswith(("cron(", "rate(")):
+            raise ReportSpecError(f"{spec.path}: schedule.extra_runs expression must be cron(...) or rate(...)")
 
     ozonetel = raw["ozonetel"]
     if not ozonetel.get("endpoint"):

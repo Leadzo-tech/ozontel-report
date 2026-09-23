@@ -3,6 +3,8 @@ import json
 import os
 from typing import Any
 
+from dataclasses import dataclass
+
 import boto3
 
 from src.report_registry import ReportSpec, load_report_specs
@@ -14,6 +16,13 @@ def rule_name(environment: str, report_name: str) -> str:
 
 def statement_id(name: str) -> str:
     return f"{name}-invoke"
+
+
+@dataclass(frozen=True)
+class DesiredRule:
+    spec: ReportSpec
+    expression: str
+    extra_input: dict[str, Any]
 
 
 class EventBridgeReconciler:
@@ -36,8 +45,20 @@ class EventBridgeReconciler:
                 rules[item["Name"]] = item
         return rules
 
-    def desired_rules(self, specs: dict[str, ReportSpec]) -> dict[str, ReportSpec]:
-        return {rule_name(self.environment, name): spec for name, spec in specs.items() if spec.enabled}
+    def desired_rules(self, specs: dict[str, ReportSpec]) -> dict[str, DesiredRule]:
+        desired: dict[str, DesiredRule] = {}
+        for name, spec in specs.items():
+            if not spec.enabled:
+                continue
+            desired[rule_name(self.environment, name)] = DesiredRule(spec, spec.schedule_expression, {})
+            # One-off runs (e.g. a backfill) as their own rules, so they need no
+            # lambda:InvokeFunction for whoever triggers them. Delete the entry
+            # from the spec afterwards and the next deploy removes the rule.
+            for run in spec.raw["schedule"].get("extra_runs") or []:
+                desired[f"{rule_name(self.environment, name)}--{run['id']}"] = DesiredRule(
+                    spec, run["expression"], dict(run.get("input") or {})
+                )
+        return desired
 
     def reconcile(self, specs: dict[str, ReportSpec], dry_run: bool = False) -> dict[str, list[str]]:
         desired = self.desired_rules(specs)
@@ -47,9 +68,10 @@ class EventBridgeReconciler:
         updated: list[str] = []
         deleted: list[str] = []
 
-        for name, spec in desired.items():
+        for name, rule in desired.items():
+            spec = rule.spec
             existing = actual.get(name)
-            needs_update = existing is None or existing.get("ScheduleExpression") != spec.schedule_expression
+            needs_update = existing is None or existing.get("ScheduleExpression") != rule.expression
             if dry_run:
                 if existing is None:
                     created.append(spec.report_name)
@@ -60,7 +82,7 @@ class EventBridgeReconciler:
             if needs_update:
                 self.events.put_rule(
                     Name=name,
-                    ScheduleExpression=spec.schedule_expression,
+                    ScheduleExpression=rule.expression,
                     State="ENABLED",
                     Description=f"Ozonetel report rule for {spec.report_name} ({self.environment})",
                     Tags=[
@@ -82,7 +104,11 @@ class EventBridgeReconciler:
                         "Id": "ozonetel-report-worker",
                         "Arn": self.lambda_arn,
                         "Input": json.dumps(
-                            {"report_name": spec.report_name, "environment": self.environment}
+                            {
+                                **rule.extra_input,
+                                "report_name": spec.report_name,
+                                "environment": self.environment,
+                            }
                         ),
                     }
                 ],
