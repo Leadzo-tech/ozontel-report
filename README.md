@@ -10,7 +10,7 @@ match what's live in AWS. Push to `main` is the only step you need.
 
 Currently one report ships: `ozonetel-cdr-sync` — pulls the last 2 days plus
 today and merges them (by `CallID`) into the full call history in the
-`Ozonetel` tab of the call-KPI sheet, every 5 minutes.
+`Ozonetel` tab of the call-KPI sheet, every 15 minutes.
 
 Before changing anything, read two sections: **"Know your target: the Ozonetel
 API"** (the API's contract is unusual and its error messages lie) and
@@ -242,7 +242,7 @@ Changing columns needs a **deploy** (the spec ships inside the Lambda zip) —
 unlike `schedule.expression`, which the reconciler applies on its own.
 
 **Don't edit headers in the sheet directly** — every run
-rewrites row 1 from this config every run, so manual edits last ~5 minutes.
+rewrites row 1 from this config every run, so manual edits last ~15 minutes.
 
 Cells are clamped to 50,000 characters (`src/sheets_client.py`) because Sheets
 rejects the entire write if one cell exceeds it.
@@ -535,7 +535,7 @@ Tests are pure — no AWS calls, no network, no credentials needed.
   alerts currently no-op silently — create it to turn them on.
 - **Schedules** are EventBridge rules `oz-prod-<report-name>`, reconciled from
   `scheduled_reports/*.yaml` on every CI run.
-- **Concurrency** is capped at 1. If a run ever exceeds the 5-minute interval,
+- **Concurrency** is capped at 1. If a run ever exceeds the 15-minute interval,
   the next invoke is throttled rather than racing it. Throttles show up as the
   `Throttles` metric on the function.
 - **This is a log, not a snapshot.** Every run merges the last

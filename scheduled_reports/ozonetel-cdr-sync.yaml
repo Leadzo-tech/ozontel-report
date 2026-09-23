@@ -2,7 +2,7 @@ report_name: ozonetel-cdr-sync
 enabled: true
 schedule:
   # EventBridge rate()/cron() — cron is UTC, rate() is interval-based.
-  expression: rate(5 minutes)
+  expression: rate(15 minutes)
   timezone: Asia/Kolkata
 ozonetel:
   endpoint: https://in1-ccaas-api.ozonetel.com/ca_reports/fetchCDRDetails
