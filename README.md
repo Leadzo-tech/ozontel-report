@@ -9,7 +9,7 @@ deploys it, and reconciles EventBridge rules so the schedules declared in YAML
 match what's live in AWS. Push to `main` is the only step you need.
 
 Currently one report ships: `ozonetel-cdr-sync` — pulls the last 2 days plus
-today and merges them (by `CallID`) into the full call history in the
+today and swaps those days into the full call history in the
 `Ozonetel` tab of the call-KPI sheet, every hour, on the hour IST.
 
 Before changing anything, read two sections: **"Know your target: the Ozonetel
@@ -205,8 +205,8 @@ are Lambda environment variables, injected by CI from GitHub secrets.
 | `worksheet_name` | Tab name. Created if missing. |
 | `start_cell` | Top-left of the written range, usually `A1`. |
 | `include_headers` | Write a header row from the resolved column list. |
-| `write_mode` | `overwrite` (default) = rewrite the tab with just this run's rows. `merge` = keep every row already on the tab and upsert this run's rows by `merge_key`, so history accumulates past Ozonetel's 15-day retention. Columns dropped from the projection are dropped from old rows too. |
-| `merge_key` | Column (projection output name) that identifies a record in `merge` mode, e.g. `CallID`. |
+| `write_mode` | `overwrite` (default) = rewrite the tab with just this run's rows. `merge` = keep every day already on the tab and replace the days this run fetched (by `date_column`) with Ozonetel's rows for them, so history accumulates past Ozonetel's 15-day retention. Whole days, not rows: a CallID repeats for every leg and ring attempt of a call, and attempts can be identical, so rows have no key. A day that comes back empty is left alone. Columns dropped from the projection are dropped from old rows too. |
+| `date_column` | Column (projection output name) holding the call date in `merge` mode, e.g. `CallDate`. |
 | `clear_before_write` | `overwrite` mode only: `true` = wipe the tab first. |
 | `columns.preferred_order` | Only for specs with no `projection`: orders these fields first, then appends every other field the API returned, alphabetically. Setting both is rejected. |
 
@@ -305,7 +305,7 @@ aws logs filter-log-events --profile leadzo --region ap-south-1 \
 Spreadsheet `1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0`
 ([open](https://docs.google.com/spreadsheets/d/1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0/edit)),
 tab **`Ozonetel`**. That tab is machine-owned: every run reads it back, merges
-in the last `days_back_routine` days plus today by `CallID`, and rewrites it.
+in the last `days_back_routine` days plus today (whole days replaced), and rewrites it.
 It is the only copy of calls older than Ozonetel's 15 days — don't delete rows
 there. Hand-edited cells are overwritten on the next run — build derived views in *other* tabs that reference
 it.
@@ -541,7 +541,7 @@ Tests are pure — no AWS calls, no network, no credentials needed.
   the next invoke is throttled rather than racing it. Throttles show up as the
   `Throttles` metric on the function.
 - **This is a log, not a snapshot.** Every run merges the last
-  `days_back_routine` days plus today into the existing rows by `CallID`. Don't
+  `days_back_routine` days plus today, replacing those days in full. Don't
   add manual columns to that tab — they will be dropped. Build derived views in a separate tab referencing this one.
 
 ## Repo layout

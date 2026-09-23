@@ -1,7 +1,7 @@
 """Ozonetel CDR -> Google Sheet sync.
 
 Pulls call detail records from Ozonetel's fetchCDRDetails API and writes them
-to the target worksheet (overwrite, or merge by CallID to keep history). Everything configurable (endpoint, pull window, sheet
+to the target worksheet (overwrite, or replace just the fetched days to keep history). Everything configurable (endpoint, pull window, sheet
 target, column order) comes from the spec in scheduled_reports/.
 
 Two things about Ozonetel's API drive the shape of this code, both verified
@@ -120,7 +120,7 @@ def run(
         sheet_spec = {**sheet_spec, "write_mode": "overwrite", "clear_before_write": True}
 
     google_sa_json = get_json_parameter(parameter_name("GOOGLE_SA_JSON_PARAM", "google/sa-json"))
-    sheet_result = SheetWriter(google_sa_json).write(sheet_spec, all_records)
+    sheet_result = SheetWriter(google_sa_json).write(sheet_spec, all_records, set(per_day_counts))
 
     return {
         "status": "success",

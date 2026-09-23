@@ -56,60 +56,33 @@ def rows_to_values(rows: list[dict[str, Any]], preferred_order: list[str] | None
     return columns, values
 
 
-def _is_rounded_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) >= _MAX_EXACT_SHEETS_INT
-
-
-def merge_rows(
-    existing_values: list[list[Any]], new_rows: list[dict[str, Any]], key: str | list[str]
+def merge_days(
+    existing_values: list[list[Any]],
+    new_rows: list[dict[str, Any]],
+    date_column: str,
+    fetched_dates: set[str],
 ) -> list[dict[str, Any]]:
-    """Upsert new_rows into the rows already on the sheet (header row first).
+    """Replace whole days: every existing row dated a day that was just fetched
+    is dropped and that day's fresh rows take its place; other days are kept.
 
-    `key` is one column or several: Ozonetel reuses a CallID for each leg of a
-    call (e.g. the queue leg and the answered leg of an inbound call), so the
-    CallID alone isn't unique. Existing rows keep their position; a new row
-    whose key matches replaces it in place, anything else is appended. Rows
-    with an empty key are always appended.
+    Rows can't be matched one by one. Ozonetel repeats a CallID for every leg
+    and ring attempt of a call, and attempts can be identical down to the
+    second, so no set of columns is a key. The API's rows for a day are the
+    truth for that day. Result is ordered by date; within a day, API order.
     """
-    columns = [key] if isinstance(key, str) else list(key)
-    merged: list[dict[str, Any]] = []
-    index: dict[tuple[str, ...], int] = {}
-    # Keys whose ID Sheets already rounded (stored as a number, see
-    # truncate_cell), with that part as its float value, so the exact key from
-    # the API can still find and replace the row.
-    rounded: dict[tuple[Any, ...], int] = {}
-
-    def exact_key(row: dict[str, Any]) -> tuple[str, ...]:
-        return tuple(str(row.get(column, "")) for column in columns)
-
+    rows = [flatten_document(r) for r in new_rows]
+    # A day that came back empty is left alone, so an API hiccup can't wipe a
+    # day that already has rows.
+    replaced = {d for d in fetched_dates if any(str(r.get(date_column, "")) == d for r in rows)}
+    replaced |= {str(r.get(date_column, "")) for r in rows}
+    kept: list[dict[str, Any]] = []
     if existing_values:
         header = existing_values[0]
         for raw in existing_values[1:]:
             row = {name: value for name, value in zip(header, raw) if name}
-            values = [row.get(column, "") for column in columns]
-            if any(_is_rounded_number(v) for v in values):
-                rounded[tuple(float(v) if _is_rounded_number(v) else str(v) for v in values)] = len(merged)
-            elif all(str(v) for v in values):
-                index[exact_key(row)] = len(merged)
-            merged.append(row)
-
-    for row in (flatten_document(r) for r in new_rows):
-        row_key = exact_key(row)
-        if not all(row_key):
-            merged.append(row)
-            continue
-        if row_key not in index and rounded:
-            as_rounded = tuple(
-                float(v) if v.isdigit() and int(v) >= _MAX_EXACT_SHEETS_INT else v for v in row_key
-            )
-            if as_rounded in rounded:
-                index[row_key] = rounded.pop(as_rounded)
-        if row_key in index:
-            merged[index[row_key]] = row
-        else:
-            index[row_key] = len(merged)
-            merged.append(row)
-    return merged
+            if str(row.get(date_column, "")) not in replaced:
+                kept.append(row)
+    return sorted(kept + rows, key=lambda r: str(r.get(date_column, "")))
 
 
 class SheetWriter:
@@ -124,22 +97,26 @@ class SheetWriter:
         except gspread.WorksheetNotFound:
             return spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=26)
 
-    def write(self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def write(
+        self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]], fetched_dates: set[str] | None = None
+    ) -> dict[str, Any]:
         if sheet_spec.get("write_mode", "overwrite") == "merge":
-            return self.merge(sheet_spec, rows)
+            return self.merge(sheet_spec, rows, fetched_dates or set())
         return self.overwrite(sheet_spec, rows)
 
-    def merge(self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
-        """Keep every row already on the sheet and upsert `rows` by merge_key,
-        so history accumulates beyond Ozonetel's 15-day retention.
+    def merge(
+        self, sheet_spec: dict[str, Any], rows: list[dict[str, Any]], fetched_dates: set[str]
+    ) -> dict[str, Any]:
+        """Keep every day already on the sheet and replace the days just
+        fetched (see merge_days), so history accumulates beyond Ozonetel's
+        15-day retention.
 
         Never clears the sheet: if a write fails partway, the old rows are still
         there (possibly with some already updated) rather than wiped."""
         worksheet = self._worksheet(sheet_spec)
-        # Unformatted, so a long numeric CallID comes back as 1234567890123456
-        # rather than "1.23457E+15" and still matches on upsert.
+        # Unformatted, so values come back as written rather than display-formatted.
         existing = worksheet.get_values(value_render_option=gspread.utils.ValueRenderOption.unformatted)
-        merged = merge_rows(existing, rows, sheet_spec["merge_key"])
+        merged = merge_days(existing, rows, sheet_spec["date_column"], fetched_dates)
 
         preferred = sheet_spec.get("columns", {}).get("preferred_order", [])
         if preferred:
@@ -148,8 +125,8 @@ class SheetWriter:
             merged = [{column: row.get(column, "") for column in preferred} for row in merged]
         columns, values = rows_to_values(merged, preferred)
         payload: list[list[Any]] = [columns, *values]
-        # Grow first so the write fits, then shrink to trim columns that were
-        # dropped. Rows only ever grow.
+        # Grow first so the write fits, then shrink to the new size (trims
+        # dropped columns, and rows if a re-fetched day came back smaller).
         worksheet.resize(
             rows=max(worksheet.row_count, len(payload)), cols=max(worksheet.col_count, len(columns))
         )

@@ -2,7 +2,7 @@ from src.sheets_client import (
     MAX_CELL_CHARS,
     compute_columns,
     flatten_document,
-    merge_rows,
+    merge_days,
     rows_to_values,
     truncate_cell,
 )
@@ -53,52 +53,32 @@ def test_rows_to_values_fills_missing_fields_with_empty_string():
     assert values == [[1, "Answered"], [2, ""]]
 
 
-def test_merge_rows_keeps_history_updates_in_place_and_appends_new():
-    existing = [["CallID", "Status"], ["1", "Unanswered"], ["2", "Answered"]]
-    new = [{"CallID": 2, "Status": "Transferred"}, {"CallID": 3, "Status": "Answered"}]
-    merged = merge_rows(existing, new, "CallID")
-    assert merged == [
-        {"CallID": "1", "Status": "Unanswered"},
-        {"CallID": 2, "Status": "Transferred"},
-        {"CallID": 3, "Status": "Answered"},
-    ]
-
-
-def test_merge_rows_on_empty_sheet_returns_new_rows():
-    assert merge_rows([], [{"CallID": 1}], "CallID") == [{"CallID": 1}]
-
-
 def test_truncate_cell_writes_long_integers_as_text():
     assert truncate_cell(90576912345678901) == "90576912345678901"
     assert truncate_cell(123) == 123
 
 
-def test_merge_rows_replaces_a_callid_sheets_rounded():
-    # Sheets stored 90576912345678901 as a double and hands it back rounded.
-    existing = [["CallID", "Status"], [9.05769123456789e16, "Unanswered"], ["1", "Answered"]]
-    new = [{"CallID": "90576912345678901", "Status": "Answered"}]
-    merged = merge_rows(existing, new, "CallID")
-    assert merged == [
-        {"CallID": "90576912345678901", "Status": "Answered"},
-        {"CallID": "1", "Status": "Answered"},
+def test_merge_days_replaces_fetched_days_and_keeps_the_rest():
+    existing = [
+        ["CallID", "CallDate", "AgentName"],
+        ["1", "2026-09-01", "A"],
+        ["2", "2026-09-22", "stale"],
     ]
-
-
-def test_merge_rows_keeps_both_legs_of_a_call_with_a_composite_key():
-    existing = [["CallID", "StartTime", "AgentName"], ["7", "15:14:34", ""]]
     new = [
-        {"CallID": "7", "StartTime": "15:14:34", "AgentName": ""},
-        {"CallID": "7", "StartTime": "15:15:39", "AgentName": "Fazil MD"},
-        {"CallID": "8", "StartTime": "16:00:00", "AgentName": ""},
-        {"CallID": "8", "StartTime": "16:00:40", "AgentName": "Fazil MD"},
+        {"CallID": "2", "CallDate": "2026-09-22", "AgentName": ""},
+        {"CallID": "2", "CallDate": "2026-09-22", "AgentName": "Fazil MD"},
+        {"CallID": "3", "CallDate": "2026-09-23", "AgentName": "B"},
     ]
-    merged = merge_rows(existing, new, ["CallID", "StartTime"])
-    assert [(r["CallID"], r["StartTime"]) for r in merged] == [
-        ("7", "15:14:34"), ("7", "15:15:39"), ("8", "16:00:00"), ("8", "16:00:40")
-    ]
+    merged = merge_days(existing, new, "CallDate", {"2026-09-22", "2026-09-23"})
+    assert merged == [{"CallID": "1", "CallDate": "2026-09-01", "AgentName": "A"}, *new]
 
 
-def test_merge_rows_composite_key_still_repairs_a_rounded_callid():
-    existing = [["CallID", "StartTime"], [9.05769123456789e16, "10:00:00"]]
-    new = [{"CallID": "90576912345678901", "StartTime": "10:00:00"}]
-    assert merge_rows(existing, new, ["CallID", "StartTime"]) == new
+def test_merge_days_keeps_identical_attempt_rows():
+    attempt = {"CallID": "9", "CallDate": "2026-09-21", "StartTime": "10:26:20"}
+    merged = merge_days([], [attempt, dict(attempt)], "CallDate", {"2026-09-21"})
+    assert len(merged) == 2
+
+
+def test_merge_days_leaves_a_day_alone_when_its_fetch_came_back_empty():
+    existing = [["CallID", "CallDate"], ["1", "2026-09-22"]]
+    assert merge_days(existing, [], "CallDate", {"2026-09-22"}) == [{"CallID": "1", "CallDate": "2026-09-22"}]

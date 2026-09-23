@@ -71,10 +71,11 @@ sheet:
   worksheet_name: Ozonetel
   start_cell: A1
   include_headers: true
-  # merge: keep every row already on the sheet and upsert fresh records, so
-  # history builds up past Ozonetel's 15-day retention. CallID + StartTime,
-  # because each leg of a call (queue, then agent) shares one CallID.
+  # merge: keep every day already on the sheet and replace only the days just
+  # fetched with Ozonetel's rows for them, so history builds up past the
+  # 15-day retention. Whole days, because a CallID repeats for every leg and
+  # ring attempt of a call — rows can't be matched one by one.
   write_mode: merge
-  merge_key: [CallID, StartTime]
+  date_column: CallDate
 notifications:
   slack_webhook_param: /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url
