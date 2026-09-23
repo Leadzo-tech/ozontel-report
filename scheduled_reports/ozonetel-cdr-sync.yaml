@@ -2,14 +2,14 @@ report_name: ozonetel-cdr-sync
 enabled: true
 schedule:
   # EventBridge rate()/cron() — cron is UTC, rate() is interval-based.
-  # Every 15 min at fixed clock times: UTC minutes 10/25/40/55 = IST :40/:55/:10/:25.
-  expression: cron(10/15 * * * ? *)
+  # Hourly on the hour IST (xx:00). IST = UTC+5:30, so that's minute 30 in UTC.
+  expression: cron(30 * * * ? *)
   timezone: Asia/Kolkata
 ozonetel:
   endpoint: https://in1-ccaas-api.ozonetel.com/ca_reports/fetchCDRDetails
   # Ozonetel retains 15 days of CDRs. A routine run re-pulls the last 2 days so
   # late-arriving/updated records get picked up without redoing the whole
-  # window every 15 minutes; full_backfill: true in the payload pulls all 15.
+  # window every hour; full_backfill: true in the payload pulls all 15.
   days_back_routine: 2
   days_back_full: 15
   # fetchCDRDetails is rate-limited to 2 requests/minute, so sleep between days.
