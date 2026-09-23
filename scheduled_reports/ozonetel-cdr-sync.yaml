@@ -4,14 +4,11 @@ schedule:
   # EventBridge rate()/cron() — cron is UTC, rate() is interval-based.
   # Hourly on the hour IST (xx:00). IST = UTC+5:30, so that's minute 30 in UTC.
   expression: cron(30 * * * ? *)
-  # One-off runs, each its own EventBridge rule. Remove an entry once it has run.
-  extra_runs:
-    # 2026-09-23 16:35 IST: clear the tab and rebuild it from all 15 retained days.
-    - id: backfill-20260923
-      expression: cron(5 11 23 9 ? 2026)
-      input:
-        full_backfill: true
-        replace: true
+  # One-off runs, each its own EventBridge rule (input is added to the event),
+  # e.g. - {id: backfill-YYYYMMDD, expression: cron(M H D MON ? YYYY),
+  #         input: {full_backfill: true, replace: true}}
+  # Remove an entry once it has run; the next deploy deletes its rule.
+  extra_runs: []
   timezone: Asia/Kolkata
 ozonetel:
   endpoint: https://in1-ccaas-api.ozonetel.com/ca_reports/fetchCDRDetails
@@ -74,9 +71,10 @@ sheet:
   worksheet_name: Ozonetel
   start_cell: A1
   include_headers: true
-  # merge: keep every row already on the sheet and upsert fresh records by
-  # CallID, so history builds up past Ozonetel's 15-day retention.
+  # merge: keep every row already on the sheet and upsert fresh records, so
+  # history builds up past Ozonetel's 15-day retention. CallID + StartTime,
+  # because each leg of a call (queue, then agent) shares one CallID.
   write_mode: merge
-  merge_key: CallID
+  merge_key: [CallID, StartTime]
 notifications:
   slack_webhook_param: /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url

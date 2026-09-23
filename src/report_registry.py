@@ -133,9 +133,12 @@ def validate_report_spec(spec: ReportSpec) -> None:
         merge_key = sheet.get("merge_key")
         if not merge_key:
             raise ReportSpecError(f"{spec.path}: sheet.merge_key is required when write_mode is 'merge'")
-        if projection and merge_key not in projection:
+        merge_columns = [merge_key] if isinstance(merge_key, str) else merge_key
+        if not isinstance(merge_columns, list) or not all(isinstance(c, str) and c for c in merge_columns):
+            raise ReportSpecError(f"{spec.path}: sheet.merge_key must be a column name or a list of them")
+        if projection and any(c not in projection for c in merge_columns):
             raise ReportSpecError(
-                f"{spec.path}: sheet.merge_key must be a column (left side) of ozonetel.projection"
+                f"{spec.path}: sheet.merge_key columns must be columns (left side) of ozonetel.projection"
             )
         # merge reads the existing rows back by header name from A1.
         if sheet["start_cell"] != "A1" or not sheet.get("include_headers", True):

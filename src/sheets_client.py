@@ -56,38 +56,58 @@ def rows_to_values(rows: list[dict[str, Any]], preferred_order: list[str] | None
     return columns, values
 
 
+def _is_rounded_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) >= _MAX_EXACT_SHEETS_INT
+
+
 def merge_rows(
-    existing_values: list[list[Any]], new_rows: list[dict[str, Any]], key: str
+    existing_values: list[list[Any]], new_rows: list[dict[str, Any]], key: str | list[str]
 ) -> list[dict[str, Any]]:
     """Upsert new_rows into the rows already on the sheet (header row first).
 
-    Existing rows keep their position; a new row whose key matches replaces it
-    in place, anything else is appended. Rows with no key are always appended.
+    `key` is one column or several: Ozonetel reuses a CallID for each leg of a
+    call (e.g. the queue leg and the answered leg of an inbound call), so the
+    CallID alone isn't unique. Existing rows keep their position; a new row
+    whose key matches replaces it in place, anything else is appended. Rows
+    with an empty key are always appended.
     """
+    columns = [key] if isinstance(key, str) else list(key)
     merged: list[dict[str, Any]] = []
-    index: dict[str, int] = {}
-    # Keys Sheets already rounded (stored as a number, see truncate_cell), by
-    # their float value, so the exact key from the API can still replace them.
-    rounded: dict[float, int] = {}
+    index: dict[tuple[str, ...], int] = {}
+    # Keys whose ID Sheets already rounded (stored as a number, see
+    # truncate_cell), with that part as its float value, so the exact key from
+    # the API can still find and replace the row.
+    rounded: dict[tuple[Any, ...], int] = {}
+
+    def exact_key(row: dict[str, Any]) -> tuple[str, ...]:
+        return tuple(str(row.get(column, "")) for column in columns)
+
     if existing_values:
         header = existing_values[0]
         for raw in existing_values[1:]:
             row = {name: value for name, value in zip(header, raw) if name}
-            value = row.get(key, "")
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) >= _MAX_EXACT_SHEETS_INT:
-                rounded[float(value)] = len(merged)
-            elif str(value):
-                index[str(value)] = len(merged)
+            values = [row.get(column, "") for column in columns]
+            if any(_is_rounded_number(v) for v in values):
+                rounded[tuple(float(v) if _is_rounded_number(v) else str(v) for v in values)] = len(merged)
+            elif all(str(v) for v in values):
+                index[exact_key(row)] = len(merged)
             merged.append(row)
+
     for row in (flatten_document(r) for r in new_rows):
-        row_key = str(row.get(key, ""))
-        if row_key and row_key not in index and row_key.isdigit() and float(row_key) in rounded:
-            index[row_key] = rounded.pop(float(row_key))
-        if row_key and row_key in index:
+        row_key = exact_key(row)
+        if not all(row_key):
+            merged.append(row)
+            continue
+        if row_key not in index and rounded:
+            as_rounded = tuple(
+                float(v) if v.isdigit() and int(v) >= _MAX_EXACT_SHEETS_INT else v for v in row_key
+            )
+            if as_rounded in rounded:
+                index[row_key] = rounded.pop(as_rounded)
+        if row_key in index:
             merged[index[row_key]] = row
         else:
-            if row_key:
-                index[row_key] = len(merged)
+            index[row_key] = len(merged)
             merged.append(row)
     return merged
 

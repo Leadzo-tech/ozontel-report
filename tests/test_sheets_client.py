@@ -82,3 +82,23 @@ def test_merge_rows_replaces_a_callid_sheets_rounded():
         {"CallID": "90576912345678901", "Status": "Answered"},
         {"CallID": "1", "Status": "Answered"},
     ]
+
+
+def test_merge_rows_keeps_both_legs_of_a_call_with_a_composite_key():
+    existing = [["CallID", "StartTime", "AgentName"], ["7", "15:14:34", ""]]
+    new = [
+        {"CallID": "7", "StartTime": "15:14:34", "AgentName": ""},
+        {"CallID": "7", "StartTime": "15:15:39", "AgentName": "Fazil MD"},
+        {"CallID": "8", "StartTime": "16:00:00", "AgentName": ""},
+        {"CallID": "8", "StartTime": "16:00:40", "AgentName": "Fazil MD"},
+    ]
+    merged = merge_rows(existing, new, ["CallID", "StartTime"])
+    assert [(r["CallID"], r["StartTime"]) for r in merged] == [
+        ("7", "15:14:34"), ("7", "15:15:39"), ("8", "16:00:00"), ("8", "16:00:40")
+    ]
+
+
+def test_merge_rows_composite_key_still_repairs_a_rounded_callid():
+    existing = [["CallID", "StartTime"], [9.05769123456789e16, "10:00:00"]]
+    new = [{"CallID": "90576912345678901", "StartTime": "10:00:00"}]
+    assert merge_rows(existing, new, ["CallID", "StartTime"]) == new
