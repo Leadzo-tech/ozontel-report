@@ -32,7 +32,7 @@ def test_loads_the_real_shipped_spec():
     specs = load_report_specs()
     assert "ozonetel-cdr-sync" in specs
     spec = specs["ozonetel-cdr-sync"]
-    assert spec.schedule_expression == "rate(15 minutes)"
+    assert spec.schedule_expression == "cron(10/15 * * * ? *)"
     assert spec.raw["sheet"]["worksheet_name"] == "Ozonetel"
 
 

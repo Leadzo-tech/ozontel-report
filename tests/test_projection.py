@@ -19,10 +19,10 @@ def test_projection_fills_missing_source_fields_with_empty_string():
     assert projected == [{"Call ID": 1, "Rating": ""}]
 
 
-def test_shipped_spec_projects_38_of_the_47_ozonetel_fields():
+def test_shipped_spec_projects_37_of_the_47_ozonetel_fields():
     spec = load_report_specs()["ozonetel-cdr-sync"]
     projection = spec.raw["ozonetel"]["projection"]
-    assert len(projection) == 38
+    assert len(projection) == 37
     assert "UCID" not in projection and "Rating" not in projection
     assert "AgentID" not in projection
     assert list(projection)[0] == "CallID"
