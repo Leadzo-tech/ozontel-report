@@ -35,7 +35,6 @@ ozonetel:
     E164: E164
     DID: DID
     Location: Location
-    AgentID: AgentID
     AgentName: AgentName
     Skill: Skill
     CampaignName: CampaignName
