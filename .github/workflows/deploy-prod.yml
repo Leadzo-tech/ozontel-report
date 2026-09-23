@@ -46,6 +46,21 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install runner dependencies
         run: pip install -r requirements-dev.txt
+      # TEMPORARY DIAGNOSTIC — prints the OIDC token's *claims* (not the token)
+      # so the IAM trust policy can be matched to the real `sub` instead of the
+      # assumed default. Remove once role assumption works.
+      - name: Show OIDC claims
+        run: |
+          set -euo pipefail
+          token=$(curl -sLS \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" | jq -r '.value')
+          payload=$(echo "$token" | cut -d. -f2)
+          pad=$(( (4 - ${#payload} % 4) % 4 ))
+          [ "$pad" -gt 0 ] && payload="${payload}$(printf '=%.0s' $(seq 1 $pad))"
+          echo "$payload" | tr '_-' '/+' | base64 -d \
+            | jq '{sub, aud, iss, repository, repository_owner, ref, workflow_ref}'
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
