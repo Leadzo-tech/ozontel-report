@@ -32,14 +32,17 @@ this sync exists in another repo).
      days_back_routine: 2
      days_back_full: 15
      rate_limit_sleep_seconds: 31
+     projection:                      # header text: Ozonetel field
+       Call ID: CallID
+       Call Date: CallDate
+       Talk Time: TalkTime
    sheet:
      spreadsheet_id: 1WsTggC...      # from /d/<id>/edit in the sheet URL
      worksheet_name: Ozonetel
      start_cell: A1
      include_headers: true
      clear_before_write: true
-     columns:
-       preferred_order: [CallID, CallDate, StartTime]
+
    notifications:
      slack_webhook_param: /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url
    ```
@@ -62,8 +65,8 @@ an AI agent — can do it end-to-end without guessing.
 
 1. **Check the field names you want actually exist** in the API response. Pull
    one day by hand (see "Verify before trusting the schedule") and look at the
-   keys. Ozonetel returns 47 columns; anything you name in `preferred_order`
-   that the API doesn't return is silently written as an empty column.
+   keys. Ozonetel returns 47 columns; anything you point `projection` at that
+   the API doesn't return is silently written as an empty column.
 2. **Write the spec** in `scheduled_reports/<name>.yaml`.
 3. **Mind the pull window.** Ozonetel retains **15 days**. `days_back_routine`
    is what a normal run pulls; `days_back_full` is the ceiling for a backfill.
@@ -184,6 +187,7 @@ outcome is in `DialStatus` / `AgentDialStatus` / `CustomerDialStatus`.
 | Field | Meaning |
 |---|---|
 | `endpoint` | Full URL. Domestic: `in1-ccaas-api.ozonetel.com`; international: `api.ccaas.ozonetel.com`. |
+| `projection` | The sheet's columns — see below. |
 | `days_back_routine` | Days pulled on a normal run. 2 picks up late-arriving/updated records without re-pulling everything. |
 | `days_back_full` | Ceiling for `full_backfill: true` invokes. Cannot exceed 15 (validator rejects it). |
 | `rate_limit_sleep_seconds` | Gap between per-day calls. Keep ≥31 for the 2 req/min limit. |
@@ -200,7 +204,41 @@ are Lambda environment variables, injected by CI from GitHub secrets.
 | `start_cell` | Top-left of the written range, usually `A1`. |
 | `include_headers` | Write a header row from the resolved column list. |
 | `clear_before_write` | `true` = wipe the tab first (this is a snapshot, not an append log). |
-| `columns.preferred_order` | Column order. Any API field not listed here is appended alphabetically after these; any listed field the API doesn't return becomes an empty column. |
+| `columns.preferred_order` | Only for specs with no `projection`: orders these fields first, then appends every other field the API returned, alphabetically. Setting both is rejected. |
+
+### Columns: adding, removing, renaming
+
+`ozonetel.projection` is the column list. Header text on the left, the Ozonetel
+API field it reads from on the right:
+
+```yaml
+ozonetel:
+  projection:
+    Call ID: CallID
+    Call Date: CallDate
+    Talk Time: TalkTime
+    Agent: AgentName
+```
+
+| To do this | Do that |
+|---|---|
+| **Add** a column | Add a line. The right side must be one of the 47 field names in "The response shape". |
+| **Remove** a column | Delete the line. Unlisted API fields are dropped. |
+| **Rename** a header | Change the left side. The right side keeps the data mapping intact, so renaming can't break anything. |
+| **Reorder** | Move the line. Projection order *is* column order. |
+
+This mirrors how the query-scheduler specs do it — all 27 of them shape their
+sheet in a single `$project` stage (`seller_name: "$company.name"`) rather than
+with separate select/rename/order settings. Same idea, minus the Mongo.
+
+A projected field Ozonetel doesn't return writes an empty column rather than
+failing, so the sheet's shape stays fixed whatever a given day's data contains.
+
+Changing columns needs a **deploy** (the spec ships inside the Lambda zip) —
+unlike `schedule.expression`, which the reconciler applies on its own.
+
+**Don't edit headers in the sheet directly** — `clear_before_write: true`
+rewrites row 1 from this config every run, so manual edits last ~5 minutes.
 
 Cells are clamped to 50,000 characters (`src/sheets_client.py`) because Sheets
 rejects the entire write if one cell exceeds it.

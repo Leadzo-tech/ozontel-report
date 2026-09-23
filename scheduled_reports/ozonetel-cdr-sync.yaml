@@ -13,60 +13,68 @@ ozonetel:
   days_back_full: 15
   # fetchCDRDetails is rate-limited to 2 requests/minute, so sleep between days.
   rate_limit_sleep_seconds: 31
+
+  # THE SHEET'S COLUMNS. Left = header text written to the sheet.
+  # Right = the Ozonetel API field it reads from.
+  #   add a column     -> add a line
+  #   remove a column  -> delete the line
+  #   rename a header  -> change the left side (e.g. `Talk Time: TalkTime`)
+  #   reorder          -> move the line
+  # Unlisted API fields are dropped. A field Ozonetel doesn't return writes an
+  # empty column rather than failing.
+  projection:
+    CallID: CallID
+    CallDate: CallDate
+    StartTime: StartTime
+    EndTime: EndTime
+    Duration: Duration
+    TalkTime: TalkTime
+    HandlingTime: HandlingTime
+    CallerID: CallerID
+    DialedNumber: DialedNumber
+    E164: E164
+    DID: DID
+    Location: Location
+    AgentID: AgentID
+    AgentName: AgentName
+    Skill: Skill
+    CampaignName: CampaignName
+    CallFlow: CallFlow
+    Type: Type
+    Status: Status
+    DialStatus: DialStatus
+    AgentDialStatus: AgentDialStatus
+    CustomerDialStatus: CustomerDialStatus
+    Disposition: Disposition
+    Comments: Comments
+    HangupBy: HangupBy
+    QueueTime: QueueTime
+    HoldDuration: HoldDuration
+    WrapupDuration: WrapupDuration
+    TimeToAnswer: TimeToAnswer
+    DialCount: DialCount
+    UCID: UCID
+    UUI: UUI
+    CallAudio: CallAudio
+    CallerConfAudioFile: CallerConfAudioFile
+    ConferenceDuration: ConferenceDuration
+    CustomerRingTime: CustomerRingTime
+    DialOutName: DialOutName
+    DynamicDID: DynamicDID
+    Event: Event
+    PickupTime: PickupTime
+    Rating: Rating
+    RatingComments: RatingComments
+    TransferType: TransferType
+    TransferredTo: TransferredTo
+    VideoRecordingURL: VideoRecordingURL
+    WrapUpEndTime: WrapUpEndTime
+    WrapUpStartTime: WrapUpStartTime
 sheet:
   spreadsheet_id: 1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0
   worksheet_name: Ozonetel
   start_cell: A1
   include_headers: true
   clear_before_write: true
-  columns:
-    preferred_order:
-      - CallID
-      - CallDate
-      - StartTime
-      - EndTime
-      - Duration
-      - TalkTime
-      - HandlingTime
-      - CallerID
-      - DialedNumber
-      - E164
-      - DID
-      - Location
-      - AgentID
-      - AgentName
-      - Skill
-      - CampaignName
-      - CallFlow
-      - Type
-      - Status
-      - DialStatus
-      - AgentDialStatus
-      - CustomerDialStatus
-      - Disposition
-      - Comments
-      - HangupBy
-      - QueueTime
-      - HoldDuration
-      - WrapupDuration
-      - TimeToAnswer
-      - DialCount
-      - UCID
-      - UUI
-      - CallAudio
-      - CallerConfAudioFile
-      - ConferenceDuration
-      - CustomerRingTime
-      - DialOutName
-      - DynamicDID
-      - Event
-      - PickupTime
-      - Rating
-      - RatingComments
-      - TransferType
-      - TransferredTo
-      - VideoRecordingURL
-      - WrapUpEndTime
-      - WrapUpStartTime
 notifications:
   slack_webhook_param: /leadzo/ozonetel-cdr-proxy-poc/poc/slack/default-webhook-url

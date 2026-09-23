@@ -60,6 +60,22 @@ def _fetch_day(endpoint: str, date_str: str, api_key: str, username: str) -> lis
     return data.get("details", [])
 
 
+def _project(records: list[dict], projection: dict[str, str]) -> list[dict]:
+    """Shape each record: keep only the projected fields, under their output
+    names, in the order declared.
+
+    This is the analog of the `$project` stage every query-scheduler spec uses —
+    one construct that selects, renames and orders, rather than three separate
+    settings. A source field Ozonetel didn't return becomes "" instead of a
+    missing key, so the sheet keeps a fixed shape whatever a given day's data
+    happens to contain.
+    """
+    return [
+        {output: record.get(source, "") for output, source in projection.items()}
+        for record in records
+    ]
+
+
 def run(spec_raw: dict[str, Any], api_key: str, username: str, full_backfill: bool = False) -> dict:
     ozonetel = spec_raw["ozonetel"]
     endpoint = ozonetel["endpoint"]
@@ -79,8 +95,19 @@ def run(spec_raw: dict[str, Any], api_key: str, username: str, full_backfill: bo
         if i > 1:
             time.sleep(sleep_seconds)
 
+    sheet_spec = spec_raw["sheet"]
+    projection = ozonetel.get("projection") or {}
+    if projection:
+        all_records = _project(all_records, projection)
+        # The projection's key order is the column order — no second list to
+        # keep in sync.
+        sheet_spec = {
+            **sheet_spec,
+            "columns": {**(sheet_spec.get("columns") or {}), "preferred_order": list(projection)},
+        }
+
     google_sa_json = get_json_parameter(parameter_name("GOOGLE_SA_JSON_PARAM", "google/sa-json"))
-    sheet_result = SheetWriter(google_sa_json).overwrite(spec_raw["sheet"], all_records)
+    sheet_result = SheetWriter(google_sa_json).overwrite(sheet_spec, all_records)
 
     return {
         "status": "success",

@@ -98,10 +98,32 @@ def validate_report_spec(spec: ReportSpec) -> None:
     if ozonetel["days_back_routine"] > ozonetel["days_back_full"]:
         raise ReportSpecError(f"{spec.path}: ozonetel.days_back_routine cannot exceed days_back_full")
 
+    projection = ozonetel.get("projection")
+    if projection is not None:
+        if not isinstance(projection, dict) or not projection:
+            raise ReportSpecError(
+                f"{spec.path}: ozonetel.projection must be a non-empty mapping of "
+                f"'Output Name: SourceField'"
+            )
+        bad = {k: v for k, v in projection.items() if not isinstance(v, str) or not v.strip()}
+        if bad:
+            raise ReportSpecError(
+                f"{spec.path}: ozonetel.projection values must be Ozonetel field names; "
+                f"bad entries: {', '.join(sorted(bad))}"
+            )
+
     sheet = raw["sheet"]
     for key in ["spreadsheet_id", "worksheet_name", "start_cell"]:
         if not sheet.get(key):
             raise ReportSpecError(f"{spec.path}: sheet.{key} is required")
+
+    # With a projection the column order is the projection's own order; a
+    # second list would just be a thing to forget to update.
+    if projection and (sheet.get("columns") or {}).get("preferred_order"):
+        raise ReportSpecError(
+            f"{spec.path}: set either ozonetel.projection or sheet.columns.preferred_order, "
+            f"not both — with a projection, its key order is the column order"
+        )
 
     notifications = raw["notifications"]
     if not notifications.get("slack_webhook_param"):
