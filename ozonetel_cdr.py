@@ -17,8 +17,10 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import requests
+import yaml
 
 from secrets import get_json_parameter
 from sheets_client import SheetWriter
@@ -27,32 +29,23 @@ OZONETEL_DOMAIN = "https://in1-ccaas-api.ozonetel.com"
 OZONETEL_ENDPOINT = f"{OZONETEL_DOMAIN}/ca_reports/fetchCDRDetails"
 IST = timezone(timedelta(hours=5, minutes=30))
 
-SHEET_SPEC = {
-    "spreadsheet_id": "1WsTggCbZbSBV4DeAzznebcH51o8pJUFLOdVJMFMrhE0",
-    "worksheet_name": "Ozonetel",
-    "start_cell": "A1",
-    "include_headers": True,
-    "clear_before_write": True,
-    "columns": {
-        "preferred_order": [
-            "CallID", "CallDate", "StartTime", "EndTime", "Duration", "TalkTime",
-            "HandlingTime", "CallerID", "DialedNumber", "E164", "DID", "Location",
-            "AgentID", "AgentName", "Skill", "CampaignName", "CallFlow", "Type",
-            "Status", "DialStatus", "AgentDialStatus", "CustomerDialStatus",
-            "Disposition", "Comments", "HangupBy", "QueueTime", "HoldDuration",
-            "WrapupDuration", "TimeToAnswer", "DialCount", "UCID", "UUI", "CallAudio",
-        ]
-    },
-}
+# Sheet target + pull window live in ozonetel_cdr.yaml (declarative config),
+# matching the scheduled_queries/*.yaml pattern from data-pipelines — change
+# the sheet or window without touching code.
+CONFIG_PATH = Path(__file__).resolve().parent / "ozonetel_cdr.yaml"
+with CONFIG_PATH.open("r", encoding="utf-8") as _f:
+    _CONFIG = yaml.safe_load(_f)
+
+SHEET_SPEC = _CONFIG["sheet"]
 
 # Ozonetel only serves the last 15 days; a full backfill pulls all of them
 # (rate-limited to 2 req/min, so this takes ~7.5 min — under the Lambda
 # timeout but worth knowing). The routine hourly run only needs the last
 # couple of days, to pick up late-arriving/updated records without redoing
 # the whole 15-day pull every time.
-DAYS_BACK_FULL = 15
-DAYS_BACK_ROUTINE = 2
-RATE_LIMIT_SLEEP_SECONDS = 31
+DAYS_BACK_FULL = _CONFIG["pull_window"]["days_back_full"]
+DAYS_BACK_ROUTINE = _CONFIG["pull_window"]["days_back_routine"]
+RATE_LIMIT_SLEEP_SECONDS = _CONFIG["pull_window"]["rate_limit_sleep_seconds"]
 
 
 def _days_ago_str(i: int) -> str:

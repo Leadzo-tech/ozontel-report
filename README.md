@@ -17,11 +17,21 @@ GET + `apiKey` header + JSON body -> 200 with real data.
 
 - `handler.py` — Lambda entry point.
 - `ozonetel_cdr.py` — pulls CDRs for the last N days, writes to the sheet.
+- `ozonetel_cdr.yaml` — declarative config: sheet target + pull window.
+  Matches the `scheduled_queries/*.yaml` pattern from data-pipelines — change
+  the target spreadsheet/tab/columns here, no code change needed.
 - `sheets_client.py` — gspread wrapper (flatten/truncate/batch-write).
 - `secrets.py` — reads the Google service account JSON from SSM Parameter Store.
 
-## Config (Lambda environment variables)
+## Config
 
+**`ozonetel_cdr.yaml`** (declarative, checked into the repo):
+- `sheet.spreadsheet_id` / `sheet.worksheet_name` — where the data goes.
+- `sheet.columns.preferred_order` — column order written to the sheet.
+- `pull_window.days_back_routine` / `days_back_full` — how many days back a
+  routine run vs. a full backfill pulls.
+
+**Lambda environment variables** (secrets/deployment-specific, not in git):
 - `OZONETEL_API_KEY`, `OZONETEL_USERNAME` — Ozonetel account credentials.
 - `GOOGLE_SA_JSON_PARAM` — SSM parameter name holding the Google service
   account JSON (`/leadzo/ozonetel-cdr-proxy-poc/poc/google/sa-json`).
@@ -45,7 +55,7 @@ Manual deploy (fallback, e.g. for local debugging without waiting on CI):
 pip install --target build -r requirements.txt \
   --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
   --only-binary=:all:
-cp handler.py ozonetel_cdr.py sheets_client.py secrets.py build/
+cp handler.py ozonetel_cdr.py sheets_client.py secrets.py ozonetel_cdr.yaml build/
 (cd build && zip -qr ../function.zip .)
 aws lambda update-function-code --function-name ozonetel-cdr-proxy-poc \
   --zip-file fileb://function.zip --region ap-south-1

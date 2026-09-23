@@ -59,7 +59,7 @@ jobs:
             --only-binary=:all: \
             --python-version 3.12 \
             --implementation cp --abi cp312
-          cp handler.py ozonetel_cdr.py sheets_client.py secrets.py build/
+          cp handler.py ozonetel_cdr.py sheets_client.py secrets.py ozonetel_cdr.yaml build/
           (cd build && zip -qr ../function.zip .)
           ls -lh function.zip
 
