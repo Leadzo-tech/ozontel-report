@@ -6,7 +6,7 @@ Each scheduled report is a YAML file in `scheduled_reports/`. The Lambda pulls
 call detail records from Ozonetel's `fetchCDRDetails` API and overwrites a
 worksheet with them. On every push to `main`, CI builds the Lambda code,
 deploys it, and reconciles EventBridge rules so the schedules declared in YAML
-match what's live in AWS.
+match what's live in AWS. Push to `main` is the only step you need.
 
 Currently one report ships: `ozonetel-cdr-sync` — last 2 days of CDRs into the
 `Ozonetel` tab of the call-KPI sheet, every 5 minutes.
@@ -389,7 +389,7 @@ Environment variables:
 | Identity | What it is | Access |
 |---|---|---|
 | `ozonetel-cdr-proxy-poc-role` | The function's **execution role** — what the code runs as | Managed `AWSLambdaBasicExecutionRole` (CloudWatch logs) + inline `read-google-sa-ssm-param`: `ssm:GetParameter` on `…/google/sa-json` only, and `kms:Decrypt` on the default `alias/aws/ssm` key. Deliberately cannot read any other parameter. |
-| `ozonetel-cdr-proxy-poc-github-actions-role` | **CI deploy role**, assumed via OIDC — no long-lived keys | Inline `ozonetel-cdr-proxy-poc-deploy`: Lambda code/config update + `AddPermission` on this one function ARN, and EventBridge rule management on `oz-prod-*`. No IAM, no CloudFormation, no S3. ⚠️ currently failing — see below. |
+| `ozonetel-cdr-proxy-poc-github-actions-role` | **CI deploy role**, assumed via OIDC — no long-lived keys | Inline `ozonetel-cdr-proxy-poc-deploy`: Lambda code/config update + `AddPermission` on this one function ARN, and EventBridge rule management on `oz-*`. No IAM, no CloudFormation, no S3. |
 | `meenal_lambda_only` | IAM **user** (a teammate), not a role | Inline `ozonetel-cdr-proxy-poc-full-access`: `lambda:*` scoped to this function's ARN and nothing else in the account. She can deploy/invoke/edit this function directly. (She also holds `QuerySchedulerLambdaAdminOnly` for a different function.) |
 
 Deliberately *not* granted anywhere: VPC access, database access, or any
@@ -414,33 +414,55 @@ python -m src.eventbridge_sync \
   --dry-run          # drop --dry-run to apply
 ```
 
-### GitHub Actions OIDC role — ⚠️ currently broken
+### GitHub Actions OIDC role
 
-`arn:aws:iam::018100542607:role/ozonetel-cdr-proxy-poc-github-actions-role`,
-trusting `repo:Leadzo-tech/ozontel-report:ref:refs/heads/main` with audience
-`sts.amazonaws.com`. Inline policy `ozonetel-cdr-proxy-poc-deploy` grants only
-Lambda code/config update on this one function and EventBridge rule management.
+`arn:aws:iam::018100542607:role/ozonetel-cdr-proxy-poc-github-actions-role`.
+Inline policy `ozonetel-cdr-proxy-poc-deploy` grants only Lambda code/config
+update on this one function, and EventBridge rule management on `oz-*`
+(plus `events:ListRules` on `*`, which cannot be resource-scoped).
 
-**CI deploys currently fail** at the credentials step with:
+**⚠️ This org customises the OIDC subject claim.** The trust policy matches:
 
 ```
-Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
+repo:Leadzo-tech@263658350/ozontel-report@1381439532:ref:refs/heads/main
 ```
 
-Ruled out: trust policy content (byte-matches the working query-scheduler
-role's shape), the OIDC provider (shared with query-scheduler, correct audience
-and thumbprint), IAM propagation delay (still failing 15+ min after creation),
-repo/branch names, and repo-level Actions settings (public repo, Actions
-enabled).
+not the documented default `repo:<org>/<repo>:ref:refs/heads/<branch>`. The org
+has GitHub's "include org and repo IDs" customisation enabled, which embeds
+immutable numeric IDs so a renamed or recreated repo can't inherit the trust.
 
-Most likely remaining cause: the **Leadzo-tech org customises the OIDC subject
-claim template**, so the real `sub` doesn't match the default
-`repo:<org>/<repo>:ref:refs/heads/<branch>` shape the trust policy expects.
-Checking that needs `admin:org`. Either confirm the template and match it, or
-widen the condition to `repo:Leadzo-tech/ozontel-report:*`.
+This costs hours if you don't know it: a trust policy written to the documented
+default fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`,
+which looks identical to a typo, a propagation delay, or a broken provider.
 
-**Until this is fixed, deploy manually** (see below). Everything else in the
-pipeline — validation, tests, build — works.
+**If you create another role for another repo in this org**, get the real claim
+rather than assuming — add a step to the workflow that prints its own token's
+claims (never the token):
+
+```yaml
+- name: Show OIDC claims
+  run: |
+    token=$(curl -sLS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+      -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" | jq -r '.value')
+    payload=$(echo "$token" | cut -d. -f2)
+    pad=$(( (4 - ${#payload} % 4) % 4 ))
+    [ "$pad" -gt 0 ] && payload="${payload}$(printf '=%.0s' $(seq 1 $pad))"
+    echo "$payload" | tr '_-' '/+' | base64 -d | jq '{sub, aud, repository}'
+```
+
+Note the numeric IDs are per-repo, so this role's trust policy is not
+copy-pasteable to another repo.
+
+### A deploy must never blank the credentials
+
+`update-function-configuration --environment` **replaces every variable** — any
+variable not re-sent is erased. An unset repo secret expands to `""`, so a naive
+`jq` merge silently wipes the live API key while the deploy reports success. The
+function then fails every run with `Missing OZONETEL_API_KEY`.
+
+This happened once, on the first deploy that got past OIDC. The workflow now
+only overwrites a credential when it actually has a value, and fails the deploy
+outright if the result would leave one empty. Keep that guard.
 
 ## One-time GCP setup (already done — for reference)
 
@@ -456,20 +478,20 @@ sheets with, not two.
 
 ## Deploy
 
-### Via CI (intended path — blocked, see the OIDC note above)
+### Via CI (the normal path)
 
 Push to `main`. `.github/workflows/deploy-prod.yml` runs two jobs: `validate`
 (spec lint + pytest) and `deploy` (build zip → `update-function-code` → merge
 `GIT_SHA` and Ozonetel creds into env vars → `python -m src.eventbridge_sync`).
 
-Requires repo secrets `OZONETEL_API_KEY` and `OZONETEL_USERNAME`:
+Requires repo secrets `OZONETEL_API_KEY` and `OZONETEL_USERNAME` (already set):
 
 ```bash
 gh secret set OZONETEL_API_KEY --repo Leadzo-tech/ozontel-report --body '<key>'
 gh secret set OZONETEL_USERNAME --repo Leadzo-tech/ozontel-report --body 'leadzo'
 ```
 
-### Manual (current working path)
+### Manual (fallback)
 
 ```bash
 rm -rf build lambda.zip && mkdir build
