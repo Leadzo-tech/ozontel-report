@@ -20,6 +20,7 @@ against production:
 """
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -29,6 +30,7 @@ import requests
 from src.logging_utils import log_event
 from src.secrets import get_json_parameter, parameter_name
 from src.sheets_client import SheetWriter
+from src.zoho_push import push_dispositions
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -97,6 +99,25 @@ def _project(records: list[dict], projection: dict[str, str]) -> list[dict]:
     ]
 
 
+def _maybe_push_to_zoho(records: list[dict]) -> None:
+    """Pushes call dispositions to Zoho CRM if ZOHO_* env vars are set;
+    silently skipped otherwise, same convention as the optional Slack
+    webhook. Failures here are logged, not raised -- a Zoho outage must
+    never break the sheet sync this function exists for."""
+    client_id = os.environ.get("ZOHO_CLIENT_ID")
+    client_secret = os.environ.get("ZOHO_CLIENT_SECRET")
+    refresh_token = os.environ.get("ZOHO_REFRESH_TOKEN")
+    accounts_domain = os.environ.get("ZOHO_ACCOUNTS_DOMAIN", "https://accounts.zoho.in")
+    api_domain = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.in")
+    if not (client_id and client_secret and refresh_token):
+        log_event("zoho_push_not_configured")
+        return
+    try:
+        push_dispositions(records, client_id, client_secret, refresh_token, accounts_domain, api_domain)
+    except Exception as exc:
+        log_event("zoho_push_failed", error_type=type(exc).__name__, error_message=str(exc))
+
+
 def run(
     spec_raw: dict[str, Any],
     api_key: str,
@@ -122,6 +143,8 @@ def run(
         # Ozonetel rate-limits fetchCDRDetails to 2 requests/minute.
         if i > 0:
             time.sleep(sleep_seconds)
+
+    _maybe_push_to_zoho(all_records)
 
     sheet_spec = spec_raw["sheet"]
     projection = ozonetel.get("projection") or {}
