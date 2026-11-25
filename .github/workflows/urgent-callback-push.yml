@@ -1,0 +1,29 @@
+name: Urgent Callback Push
+
+on:
+  schedule:
+    # Every 5 minutes. Independent of the hourly CDR-sync Lambda -- this is
+    # plain Zoho + Ozonetel REST calls, no AWS involved, so it can't collide
+    # with that function's reserved concurrency.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install requests
+      - name: Push urgent callback leads
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          ZOHO_ACCOUNTS_DOMAIN: ${{ secrets.ZOHO_ACCOUNTS_DOMAIN }}
+          ZOHO_API_DOMAIN: ${{ secrets.ZOHO_API_DOMAIN }}
+          OZONETEL_API_KEY: ${{ secrets.OZONETEL_API_KEY }}
+        run: python scripts/urgent_callback_push.py
